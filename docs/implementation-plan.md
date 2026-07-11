@@ -4,7 +4,7 @@
 機能基準: Herdr v0.7.3  
 現行互換基準: dotfiles の Bash 版 agentmux (`1e4d5540`)
 
-実装状況 (2026-07-11): P0 の Cargo/test/control-mode spike と、P1 の usable MVP を実装済み。Linux/tmux 3.7b で unit test、isolated tmux integration、実TUI captureを検証した。P1 の残りは Bash differential test の拡充、macOS/対応tmux下限のCI、install migrationである。
+実装状況 (2026-07-11): P0 の Cargo/test/control-mode spike と、P1 の usable MVP を実装済み。Linux/tmux 3.7b で unit test、isolated tmux integration、実TUI captureを検証した。LazyAgent buffer ACPは`publish` / owner-safe `withdraw`でnative lifecycleを公開する。P1 の残りは Bash differential test の拡充、macOS/対応tmux下限のCI、install migrationである。
 
 ## 1. 目標
 
@@ -57,7 +57,7 @@ agentmux worktree create --session main --branch feature/auth
 
 - Herdr 独自 terminal renderer の再実装
 - native Windows。WSL は対象
-- Herdr の source、logo、文章、音源、detection manifest のコピー
+- Herdr のlogo、文章、音源などブランドassetのコピー
 - Plugin の sandbox。任意 code を実行する拡張として明示する
 
 ## 3. 実装開始前の既定判断
@@ -75,9 +75,9 @@ agentmux worktree create --session main --branch feature/auth
 | API | Unix socket + newline-delimited JSON | CLI、hook、plugin、長寿命 subscription に適する |
 | compatibility | 現行 CLI と `@agent_*` options を維持 | tmux binding と LazyAgent integration を壊さない |
 | parity baseline | v0.7.3 を freeze | 進行中の Herdr master に scope を動かされない |
-| license | Herdr code 非流用の独自実装 | agentmux の license 選択肢を保つ |
+| license | AGPL-3.0-or-later | Herdr由来の検出エンジン・manifestと互換にする |
 
-License の最終選択だけは P0 完了条件にする。Herdr code を利用する判断に変える場合は AGPL-3.0-or-later の適用範囲を先に確認する。
+Herdr v0.7.3の検出エンジン・manifestを固定コミットから移植し、派生元を `NOTICE` に記録する。agentmux全体をAGPL-3.0-or-laterで扱う。
 
 ## 4. Architecture
 
@@ -532,7 +532,7 @@ tmux -L "agentmux-test-$PID-$RANDOM" -f /dev/null new-session -d
 | shell/target command injection | argv実行、canonical ID、曖昧target拒否、Git ref検証 |
 | agent config formatの更新 | agent別versioned editor、backup、idempotency、fixture |
 | Herdr が高速に更新 | v0.7.3をfreeze、以後は別backlogとして差分監査 |
-| AGPL source混入 | public behaviorから独自実装、provenance記録、asset非流用 |
+| upstreamとのライセンス・由来が不明瞭 | AGPL適用、固定commitと移植fileをNOTICEへ記録、ブランドasset非流用 |
 | plugin任意code | trust preview、明示confirm、source pin、権限を文書化 |
 | remote scopeの肥大化 | SSH内利用を先に完成しthin clientはP7まで遅らせる |
 

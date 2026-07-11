@@ -9,7 +9,7 @@ tmux 上で動く複数の coding agent を、Herdr のサイドバーに近い�
 - `spaces` と `agents` の2段サイドバー
 - blocked → done → working → idle → unknown の優先表示
 - session/window/pane を横断した一覧と adaptive preview
-- ANSI 16/256/truecolorと文字装飾を保った、末尾自動追従live preview
+- ANSI色・文字装飾・改行境界・cursor位置を保つvisible-screen preview
 - blocked=赤、working=黄spinner、done=teal、idle=緑のHerdr式状態アイコン
 - foreground command、TTY process、argv0、Node/Python package path、pane options による agent 識別
 - 識別済みagentの画面下端による状態推定（画面本文はagent識別に不使用）
@@ -80,9 +80,28 @@ agentmux unmark %25
 agentmux respawn %25
 ```
 
+Editor integration向けには、識別情報と状態を一度に更新する`publish`と、ownerが一致する場合だけ解除する`withdraw`があります。LazyAgent ACPはこのinterfaceを自動利用します。
+
+```sh
+agentmux publish "$TMUX_PANE" --kind copilot --name "Copilot (ACP)" \
+  --state working --message "Thinking..." --owner lazyagent --owner-pid "$$" \
+  --preview-path /path/to/live-transcript.log
+agentmux withdraw "$TMUX_PANE" --owner lazyagent
+```
+
 Target には `%pane_id`、`session:window.pane`、一意な agent name/kind を指定できます。曖昧な名前はエラーになります。
 
 誤検出を調べる場合は `agentmux explain <target>` を使います。agentの識別根拠と状態判定の根拠を別々に表示します。nvimなどeditor内のintegrationは `@agent_kind` と `@agent_status` をpublishすることで検出され、通常のbuffer本文にagent名が書かれているだけでは検出されません。
+
+### GitHub Copilot CLI state
+
+Copilot CLIはprocessだけではworking/doneを安定して公開しないため、公式hookを使います。[contrib/copilot-hooks.json](contrib/copilot-hooks.json)を`~/.copilot/hooks/agentmux.json`として配置するか、同じ`hooks`オブジェクトを`~/.copilot/settings.json`へmergeし、Copilotを再起動してください。
+
+- `userPromptSubmitted`: working
+- `permissionRequest`: blocked
+- `postToolUse`: working
+- `agentStop`: done
+- trust dialog / prompt: screen fallbackでblocked / idle
 
 別の tmux socket name を使う場合:
 
@@ -109,11 +128,13 @@ preview_ms = 50
 status_ms = 250
 ```
 
-UI全体の幅が`preview_min_width`未満ならpreviewを描画せず、spaces/agents sidebarだけを全幅表示します。色付きpreviewはtmuxの`capture-pane -e`からforeground/background color、太字、italic、underlineなどを復元します。agentmux自身は背景色を指定せず、terminalの背景を継承します。
+UI全体の幅が`preview_min_width`未満ならpreviewを描画せず、spaces/agents sidebarだけを全幅表示します。previewはtmuxの現在のvisible cell gridを`capture-pane -e`で取得し、foreground/background color、太字、italic、underline、元の改行境界、cursor位置を復元します。再wrapやscrollback連結は行いません。agentmux自身は背景色を指定せず、terminalの背景を継承します。
+
+これはcell snapshotの同期表示であり、tmux paneそのものの複製ではありません。sixel/kitty画像、OSC hyperlink、IME、application固有のcursor形状、非常に短い出力後の空白領域などは完全には再現できません。
 
 ## Current boundary
 
-このバージョンは「tmuxで使えるHerdr風サイドバー」の基礎です。永続daemon、`done = idle + unseen`、agent別manifest、通知、worktree、plugin、remote thin clientは次のphaseです。tmux自身が提供するPTY、session永続化、layout、copy-modeは再実装しません。
+このバージョンは「tmuxで使えるHerdr風サイドバー」の基礎です。Herdr v0.7.3由来のagent別manifestで画面状態を判定します。永続daemon、`done = idle + unseen`、通知、worktree、plugin、remote thin clientは次のphaseです。tmux自身が提供するPTY、session永続化、layout、copy-modeは再実装しません。
 
 設計・調査文書:
 
@@ -121,4 +142,4 @@ UI全体の幅が`preview_min_width`未満ならpreviewを描画せず、spaces/
 - [機能 parity matrix](docs/parity-matrix.md)
 - [実装計画](docs/implementation-plan.md)
 
-ライセンスは未決定です。HerdrのAGPL source/assetsは流用せず、公開仕様とtmux APIから独自実装しています。
+ライセンスは `AGPL-3.0-or-later` です。状態判定エンジンとmanifestはHerdr v0.7.3を移植しており、固定した派生元は [NOTICE](NOTICE) に記録しています。ロゴ、音源などのブランドassetは含めていません。

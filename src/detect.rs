@@ -2,6 +2,8 @@ use crate::model::AgentState;
 use regex::Regex;
 use std::sync::OnceLock;
 
+mod manifest;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DetectedStatus {
     pub state: AgentState,
@@ -29,16 +31,32 @@ pub fn detect_agent_command(command: &str) -> Option<String> {
     }
 
     const AGENTS: &[(&str, &str)] = &[
-        ("qodercli", "qoder"),
-        ("antigravity", "antigravity"),
+        ("github-copilot", "copilot"),
+        ("antigravity-cli", "agy"),
+        ("cursor-agent", "cursor"),
+        ("qoderclicn", "qodercli"),
+        ("qodercli", "qodercli"),
+        ("claude-code", "claude"),
+        ("devin-cli", "devin"),
+        ("grok-build", "grok"),
+        ("hermes-agent", "hermes"),
+        ("kilo-code", "kilo"),
+        ("kimi-code", "kimi"),
+        ("kiro-cli", "kiro"),
+        ("mastra-code", "mastracode"),
+        ("open-code", "opencode"),
+        ("amp-local", "amp"),
+        ("antigravity", "agy"),
         ("mastracode", "mastracode"),
         ("opencode", "opencode"),
         ("copilot", "copilot"),
+        ("ghcs", "copilot"),
         ("claude", "claude"),
         ("codex", "codex"),
         ("devin", "devin"),
         ("droid", "droid"),
-        ("qoder", "qoder"),
+        ("qodercn", "qodercli"),
+        ("qoder", "qodercli"),
         ("kimi", "kimi"),
         ("kilo", "kilo"),
         ("hermes", "hermes"),
@@ -48,6 +66,7 @@ pub fn detect_agent_command(command: &str) -> Option<String> {
         ("cline", "cline"),
         ("aiagent", "aiagent"),
         ("amp", "amp"),
+        ("agy", "agy"),
         ("omp", "omp"),
         ("pi", "pi"),
     ];
@@ -71,6 +90,14 @@ fn is_word(ch: char) -> bool {
 }
 
 pub fn screen_status(kind: &str, screen: &str) -> DetectedStatus {
+    screen_status_with_title(kind, screen, "")
+}
+
+pub fn screen_status_with_title(kind: &str, screen: &str, pane_title: &str) -> DetectedStatus {
+    if let Some(detected) = manifest::detect(kind, screen, pane_title) {
+        return detected;
+    }
+
     let active = ACTIVE_RE.get_or_init(|| {
         Regex::new(
             r"(?i)(esc to interrupt|ctrl-c to interrupt|press esc to interrupt|working \([0-9]+[smh]|thinking(?:\.\.\.|…)|running tool|executing tool)",
@@ -86,7 +113,7 @@ pub fn screen_status(kind: &str, screen: &str) -> DetectedStatus {
 
     let blocked = BLOCKED_RE.get_or_init(|| {
         Regex::new(
-            r"(?i)(do you want to (?:proceed|continue|allow)|would you like to|approve (?:this|the)|requesting permission|waiting for (?:your )?(?:input|approval)|press enter to confirm|choose (?:an|one) option|\[[yY]/[nN]\]|\([yY]/[nN]\))",
+            r"(?i)(do you want to (?:proceed|continue|allow)|would you like to|approve (?:this|the)|requesting permission|waiting for (?:your )?(?:input|approval)|press enter to confirm|choose (?:an|one) option|confirm folder trust|do you trust the files|enter to select|\[[yY]/[nN]\]|\([yY]/[nN]\))",
         )
         .expect("valid blocked regex")
     });
@@ -100,7 +127,7 @@ pub fn screen_status(kind: &str, screen: &str) -> DetectedStatus {
     let prompt_ready = screen.lines().rev().take(8).any(|line| {
         let trimmed = line.trim_start();
         match kind {
-            "codex" => trimmed.starts_with('›') || trimmed.starts_with('❯'),
+            "codex" | "copilot" => trimmed.starts_with('›') || trimmed.starts_with('❯'),
             "claude" => trimmed.starts_with('>'),
             _ => false,
         }
@@ -114,7 +141,7 @@ pub fn screen_status(kind: &str, screen: &str) -> DetectedStatus {
 
     DetectedStatus {
         state: AgentState::Idle,
-        source: "process:alive, no active indicator".into(),
+        source: "generic:alive, no active indicator".into(),
     }
 }
 
@@ -168,20 +195,37 @@ mod tests {
         );
         assert_eq!(detect_agent_command("polybar example"), None);
         assert_eq!(detect_agent_command("vampire"), None);
+        assert_eq!(detect_agent_command("ghcs"), Some("copilot".into()));
+        assert_eq!(detect_agent_command("antigravity-cli"), Some("agy".into()));
+        assert_eq!(detect_agent_command("qoderclicn"), Some("qodercli".into()));
     }
 
     #[test]
     fn blocked_requires_a_known_prompt_shape() {
         let status = screen_status("codex", "Do you want to proceed? [y/N]");
         assert_eq!(status.state, AgentState::Blocked);
-        let status = screen_status("codex", "documentation mentions blocked states\n› ");
+        let status = screen_status("unknown-agent", "documentation mentions blocked states\n› ");
         assert_eq!(status.state, AgentState::Idle);
     }
 
     #[test]
     fn active_indicator_wins() {
-        let status = screen_status("claude", "Thinking…\nEsc to interrupt");
+        let status = screen_status("unknown-agent", "Thinking…\nEsc to interrupt");
         assert_eq!(status.state, AgentState::Working);
+    }
+
+    #[test]
+    fn copilot_trust_dialog_is_blocked() {
+        let screen = "Confirm folder trust\nDo you trust the files in this folder?\n❯ 1. Yes\nenter to select";
+        let status = screen_status("copilot", screen);
+        assert_eq!(status.state, AgentState::Blocked);
+    }
+
+    #[test]
+    fn copilot_prompt_is_idle() {
+        let status = screen_status("copilot", "~/project [main]\n❯\n/ commands · ? help");
+        assert_eq!(status.state, AgentState::Idle);
+        assert_eq!(status.source, "manifest:copilot:idle-fallback");
     }
 
     #[test]

@@ -1,4 +1,8 @@
-use agentmux::{config::LoadedConfig, tmux::Tmux, tui};
+use agentmux::{
+    config::LoadedConfig,
+    tmux::{PublishedAgent, Tmux},
+    tui,
+};
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
 use serde::Serialize;
@@ -99,6 +103,30 @@ enum Commands {
     },
     /// Clear a published native status.
     ClearStatus { target: String },
+    /// Publish an editor-hosted agent and its native state.
+    Publish {
+        target: String,
+        #[arg(long)]
+        kind: String,
+        #[arg(long)]
+        name: String,
+        #[arg(long)]
+        state: String,
+        #[arg(long)]
+        message: Option<String>,
+        #[arg(long)]
+        owner: String,
+        #[arg(long)]
+        owner_pid: i32,
+        #[arg(long)]
+        preview_path: Option<String>,
+    },
+    /// Remove editor-hosted metadata when it belongs to the given owner.
+    Withdraw {
+        target: String,
+        #[arg(long)]
+        owner: String,
+    },
 }
 
 fn main() -> Result<()> {
@@ -259,6 +287,30 @@ fn main() -> Result<()> {
         Commands::ClearStatus { target } => {
             let pane = tmux.resolve_pane(&target)?;
             tmux.clear_status(&pane.pane_id)?;
+        }
+        Commands::Publish {
+            target,
+            kind,
+            name,
+            state,
+            message,
+            owner,
+            owner_pid,
+            preview_path,
+        } => tmux.publish_agent(
+            &target,
+            PublishedAgent {
+                kind: &kind,
+                name: &name,
+                state: &state,
+                message: message.as_deref(),
+                owner: &owner,
+                owner_pid,
+                preview_path: preview_path.as_deref(),
+            },
+        )?,
+        Commands::Withdraw { target, owner } => {
+            tmux.withdraw_agent(&target, &owner)?;
         }
     }
     Ok(())

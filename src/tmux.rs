@@ -1,13 +1,15 @@
 use crate::{
     detect::{
-        detect_agent_command, last_line, normalize_status, one_line, recent_meaningful,
-        screen_status, strip_ansi,
+        detect_agent_command, last_line, normalize_status, one_line, screen_status_with_title,
+        strip_ansi,
     },
     model::{AgentState, PaneRecord, Snapshot},
 };
 use anyhow::{Context, Result, anyhow, bail};
 use std::{
     collections::HashMap,
+    fs::File,
+    io::{Read, Seek, SeekFrom},
     process::{Command, Output},
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -26,6 +28,26 @@ const PANE_FORMAT: &str = concat!(
 #[derive(Debug, Clone, Default)]
 pub struct Tmux {
     socket_name: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct PaneView {
+    pub ansi: String,
+    pub width: u16,
+    pub height: u16,
+    pub cursor_x: u16,
+    pub cursor_y: u16,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct PublishedAgent<'a> {
+    pub kind: &'a str,
+    pub name: &'a str,
+    pub state: &'a str,
+    pub message: Option<&'a str>,
+    pub owner: &'a str,
+    pub owner_pid: i32,
+    pub preview_path: Option<&'a str>,
 }
 
 impl Tmux {
@@ -53,8 +75,15 @@ impl Tmux {
             }
             let tty = fields[10].to_owned();
             let processes = process_map.get(&tty).map(Vec::as_slice).unwrap_or_default();
-            let explicit_name = nonempty(fields[14]);
-            let explicit_kind = nonempty(fields[15]);
+            let status_pid = fields[22].parse::<i32>().ok();
+            let owned_metadata_stale = !fields[23].is_empty()
+                && status_pid.is_some_and(|pid| pid > 0 && !process_alive(pid));
+            let explicit_name = (!owned_metadata_stale)
+                .then(|| nonempty(fields[14]))
+                .flatten();
+            let explicit_kind = (!owned_metadata_stale)
+                .then(|| nonempty(fields[15]))
+                .flatten();
             let process_agent = detect_agent_process(fields[7], processes);
             let (kind, identity_source) = if let Some(kind) = explicit_kind {
                 (Some(kind), Some("pane-option:@agent_kind".to_owned()))
@@ -76,8 +105,8 @@ impl Tmux {
             let explicit_status = nonempty(fields[18]);
             let status_at = fields[19].parse::<u64>().unwrap_or_default();
             let status_ttl = fields[20].parse::<u64>().unwrap_or_default();
-            let status_pid = fields[22].parse::<i32>().ok();
             let explicit_fresh = explicit_status.is_some()
+                && !owned_metadata_stale
                 && explicit_status_is_fresh(now, status_at, status_ttl, status_pid);
 
             let (state, source) = if dead {
@@ -93,7 +122,7 @@ impl Tmux {
                 } else if is_shell_command(fields[7]) && process_agent.is_none() {
                     (AgentState::Idle, "process:agent exited".to_owned())
                 } else {
-                    let detected = screen_status(agent_kind, &recent_meaningful(&screen, 16));
+                    let detected = screen_status_with_title(agent_kind, &screen, fields[9]);
                     (detected.state, detected.source)
                 }
             } else if is_shell_command(fields[7]) {
@@ -175,6 +204,45 @@ impl Tmux {
         let start = format!("-{}", lines.max(1));
         let body = self.run(["capture-pane", "-epJ", "-t", pane, "-S", &start])?;
         Ok(format!("{header}\n\n{body}"))
+    }
+
+    pub fn pane_view(&self, pane: &str) -> Result<PaneView> {
+        let metadata = self.run([
+            "display-message",
+            "-p",
+            "-t",
+            pane,
+            "#{pane_width}\x1f#{pane_height}\x1f#{cursor_x}\x1f#{cursor_y}\x1f#{@agent_preview_path}\x1f#{@agent_status_pid}\x1f#{@agent_status_owner}",
+        ])?;
+        let fields: Vec<_> = metadata.trim().split(SEP).collect();
+        if fields.len() != 7 {
+            bail!("tmux returned invalid pane view metadata");
+        }
+        let width = fields[0].parse().context("invalid pane width")?;
+        let height = fields[1].parse().context("invalid pane height")?;
+        let owner_pid = fields[5].parse::<i32>().ok();
+        if !fields[4].is_empty()
+            && !fields[6].is_empty()
+            && owner_pid.is_some_and(|pid| pid > 0 && process_alive(pid))
+        {
+            if let Ok(text) = read_preview_tail(fields[4]) {
+                let content_height = text.lines().count().clamp(1, u16::MAX as usize) as u16;
+                return Ok(PaneView {
+                    ansi: colorize_acp_transcript(&text),
+                    width,
+                    height: content_height,
+                    cursor_x: 0,
+                    cursor_y: content_height.saturating_sub(1),
+                });
+            }
+        }
+        Ok(PaneView {
+            ansi: self.run(["capture-pane", "-ep", "-t", pane])?,
+            width,
+            height,
+            cursor_x: fields[2].parse().context("invalid cursor x")?,
+            cursor_y: fields[3].parse().context("invalid cursor y")?,
+        })
     }
 
     pub fn focus_pane(&self, pane: &str, client: Option<&str>) -> Result<()> {
@@ -333,6 +401,74 @@ impl Tmux {
         Ok(())
     }
 
+    pub fn publish_agent(&self, pane: &str, agent: PublishedAgent<'_>) -> Result<()> {
+        let normalized = normalize_status(agent.state)
+            .ok_or_else(|| anyhow!("unknown agent status {:?}", agent.state))?;
+        if agent.kind.trim().is_empty()
+            || agent.name.trim().is_empty()
+            || agent.owner.trim().is_empty()
+        {
+            bail!("kind, name, and owner must not be empty");
+        }
+        if agent.owner_pid <= 0 {
+            bail!("owner-pid must be a positive process id");
+        }
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs()
+            .to_string();
+        let owner_pid = agent.owner_pid.to_string();
+        let values = [
+            ("@agent_kind", agent.kind),
+            ("@agent_name", agent.name),
+            ("@agent_status", normalized.label()),
+            ("@agent_status_at", now.as_str()),
+            ("@agent_status_ttl", "0"),
+            ("@agent_status_message", agent.message.unwrap_or_default()),
+            ("@agent_status_pid", owner_pid.as_str()),
+            ("@agent_status_owner", agent.owner),
+            (
+                "@agent_preview_path",
+                agent.preview_path.unwrap_or_default(),
+            ),
+        ];
+        for (option, value) in values {
+            self.set_option(pane, option, value)?;
+        }
+        Ok(())
+    }
+
+    pub fn withdraw_agent(&self, pane: &str, owner: &str) -> Result<bool> {
+        let output = self.output(["show-option", "-pv", "-t", pane, "@agent_status_owner"])?;
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            if stderr.contains("invalid option") || stderr.contains("unknown option") {
+                return Ok(false);
+            }
+            bail!("tmux show-option failed: {}", stderr.trim());
+        }
+        if String::from_utf8_lossy(&output.stdout).trim() != owner {
+            return Ok(false);
+        }
+        for option in [
+            "@agent_kind",
+            "@agent_name",
+            "@agent_command",
+            "@agent_created_at",
+            "@agent_status",
+            "@agent_status_at",
+            "@agent_status_ttl",
+            "@agent_status_message",
+            "@agent_status_pid",
+            "@agent_status_owner",
+            "@agent_preview_path",
+        ] {
+            self.unset_option(pane, option)?;
+        }
+        Ok(true)
+    }
+
     pub fn session_for_pane(&self, pane: &str) -> Result<String> {
         Ok(self
             .run(["display-message", "-p", "-t", pane, "#{session_name}"])?
@@ -406,6 +542,76 @@ impl Tmux {
 
 fn nonempty(value: &str) -> Option<String> {
     (!value.is_empty()).then(|| value.to_owned())
+}
+
+fn read_preview_tail(path: &str) -> Result<String> {
+    const MAX_BYTES: u64 = 256 * 1024;
+    let mut file = File::open(path).context("failed to open published preview")?;
+    let length = file.metadata()?.len();
+    let start = length.saturating_sub(MAX_BYTES);
+    file.seek(SeekFrom::Start(start))?;
+    let mut bytes = Vec::with_capacity((length - start) as usize);
+    file.read_to_end(&mut bytes)?;
+    if start > 0 {
+        if let Some(newline) = bytes.iter().position(|byte| *byte == b'\n') {
+            bytes.drain(..=newline);
+        }
+    }
+    Ok(String::from_utf8_lossy(&bytes).into_owned())
+}
+
+fn colorize_acp_transcript(text: &str) -> String {
+    if text.contains('\x1b') {
+        return text.to_owned();
+    }
+
+    const RESET: &str = "\x1b[0m";
+    const USER: &str = "\x1b[1;38;2;137;180;250m";
+    const ASSISTANT: &str = "\x1b[1;38;2;166;227;161m";
+    const SYSTEM: &str = "\x1b[1;38;2;186;194;222m";
+    const ERROR: &str = "\x1b[1;38;2;243;139;168m";
+    const TOOL: &str = "\x1b[1;38;2;249;226;175m";
+    const CODE: &str = "\x1b[38;2;148;226;213m";
+    const HEADING: &str = "\x1b[1;38;2;203;166;247m";
+
+    let mut output = String::with_capacity(text.len() + text.lines().count() * 12);
+    let mut in_code = false;
+    for line in text.split_inclusive('\n') {
+        let body = line.strip_suffix('\n').unwrap_or(line);
+        let newline = if line.ends_with('\n') { "\n" } else { "" };
+        let lower = body.to_lowercase();
+        let color = if body.trim_start().starts_with("```") {
+            in_code = !in_code;
+            Some(HEADING)
+        } else if in_code {
+            Some(CODE)
+        } else if body.starts_with('─') || body.starts_with('╭') {
+            if lower.contains("error") || body.contains('󰅚') {
+                Some(ERROR)
+            } else if lower.contains("user") || body.contains('󰍩') {
+                Some(USER)
+            } else if lower.contains("system") || body.contains('󰋽') {
+                Some(SYSTEM)
+            } else if lower.contains("tool") {
+                Some(TOOL)
+            } else {
+                Some(ASSISTANT)
+            }
+        } else if body.starts_with('#') {
+            Some(HEADING)
+        } else {
+            None
+        };
+        if let Some(color) = color {
+            output.push_str(color);
+            output.push_str(body);
+            output.push_str(RESET);
+            output.push_str(newline);
+        } else {
+            output.push_str(line);
+        }
+    }
+    output
 }
 
 fn is_shell_command(command: &str) -> bool {
@@ -608,5 +814,17 @@ mod tests {
                 "failed to detect {args}"
             );
         }
+    }
+
+    #[test]
+    fn acp_transcript_colors_roles_without_adding_a_background() {
+        let colored = colorize_acp_transcript(
+            "─ 󰍩 User\nhello\n─ 󰭹 Codex\n```rust\nfn main() {}\n```\n─ 󰅚 Error\n",
+        );
+        assert!(colored.contains("\x1b[1;38;2;137;180;250m─ 󰍩 User"));
+        assert!(colored.contains("\x1b[1;38;2;166;227;161m─ 󰭹 Codex"));
+        assert!(colored.contains("\x1b[38;2;148;226;213mfn main() {}"));
+        assert!(colored.contains("\x1b[1;38;2;243;139;168m─ 󰅚 Error"));
+        assert!(!colored.contains("48;2;"));
     }
 }

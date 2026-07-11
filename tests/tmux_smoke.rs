@@ -1,4 +1,8 @@
-use agentmux::{model::AgentState, tmux::Tmux, watcher};
+use agentmux::{
+    model::AgentState,
+    tmux::{PublishedAgent, Tmux},
+    watcher,
+};
 use std::{
     fs,
     process::Command,
@@ -105,6 +109,78 @@ fn pane_options_flow_into_snapshot_and_rollup() {
     tmux.clear_status(&pane_id).unwrap();
     tmux.unmark(&pane_id).unwrap();
     assert!(!tmux.snapshot().unwrap().panes[0].is_agent());
+}
+
+#[test]
+fn editor_publish_and_owner_safe_withdraw_flow_into_snapshot() {
+    let Some(server) = TestServer::start() else {
+        eprintln!("tmux unavailable; skipping integration smoke test");
+        return;
+    };
+    let tmux = Tmux::new(Some(server.socket.clone()));
+    let pane_id = tmux.snapshot().unwrap().panes[0].pane_id.clone();
+    assert!(!tmux.withdraw_agent(&pane_id, "lazyagent").unwrap());
+    let preview_path = std::env::temp_dir().join(format!(
+        "agentmux-acp-preview-{}-{}.log",
+        std::process::id(),
+        SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    fs::write(
+        &preview_path,
+        "─ User\nshow the ACP transcript\n\n─ Assistant\npreview marker\n",
+    )
+    .unwrap();
+
+    tmux.publish_agent(
+        &pane_id,
+        PublishedAgent {
+            kind: "copilot",
+            name: "Copilot (ACP)",
+            state: "working",
+            message: Some("Thinking..."),
+            owner: "lazyagent",
+            owner_pid: std::process::id() as i32,
+            preview_path: preview_path.to_str(),
+        },
+    )
+    .unwrap();
+
+    let record = tmux.snapshot().unwrap().pane(&pane_id).unwrap().clone();
+    assert_eq!(record.agent_kind.as_deref(), Some("copilot"));
+    assert_eq!(record.agent_name.as_deref(), Some("Copilot (ACP)"));
+    assert_eq!(record.state, AgentState::Working);
+    assert_eq!(record.state_source, "native:working");
+    assert!(
+        tmux.pane_view(&pane_id)
+            .unwrap()
+            .ansi
+            .contains("preview marker")
+    );
+
+    assert!(!tmux.withdraw_agent(&pane_id, "someone-else").unwrap());
+    assert!(tmux.snapshot().unwrap().pane(&pane_id).unwrap().is_agent());
+    assert!(tmux.withdraw_agent(&pane_id, "lazyagent").unwrap());
+    assert!(!tmux.snapshot().unwrap().pane(&pane_id).unwrap().is_agent());
+    let _ = fs::remove_file(&preview_path);
+
+    tmux.publish_agent(
+        &pane_id,
+        PublishedAgent {
+            kind: "copilot",
+            name: "stale ACP",
+            state: "working",
+            message: None,
+            owner: "lazyagent",
+            owner_pid: i32::MAX,
+            preview_path: None,
+        },
+    )
+    .unwrap();
+    assert!(!tmux.snapshot().unwrap().pane(&pane_id).unwrap().is_agent());
+    assert!(tmux.withdraw_agent(&pane_id, "lazyagent").unwrap());
 }
 
 #[test]
@@ -238,4 +314,33 @@ fn tmux_config_replaces_stale_popup_bindings_with_panes() {
             .iter()
             .all(|line| !line.contains("legacy-agentmux"))
     );
+}
+
+#[test]
+fn pane_view_captures_only_the_visible_cell_grid() {
+    let Some(server) = TestServer::start_with("sh -c 'seq 1 80; sleep 30'") else {
+        eprintln!("tmux unavailable; skipping integration smoke test");
+        return;
+    };
+    thread::sleep(Duration::from_millis(150));
+    let tmux = Tmux::new(Some(server.socket.clone()));
+    let pane = tmux.snapshot().unwrap().panes[0].pane_id.clone();
+    let view = tmux.pane_view(&pane).unwrap();
+
+    assert!(view.width > 0);
+    assert!(view.height > 0);
+    assert_eq!(view.ansi.lines().count(), usize::from(view.height));
+    assert!(view.ansi.contains("80"));
+    assert!(!view.ansi.contains("pane %"));
+    assert!(view.cursor_x < view.width);
+    assert!(view.cursor_y < view.height);
+}
+
+#[test]
+fn copilot_hook_manifest_is_valid_json() {
+    let manifest = include_str!("../contrib/copilot-hooks.json");
+    let parsed: serde_json::Value = serde_json::from_str(manifest).unwrap();
+    assert_eq!(parsed["version"], 1);
+    assert!(parsed["hooks"]["userPromptSubmitted"].is_array());
+    assert!(parsed["hooks"]["agentStop"].is_array());
 }

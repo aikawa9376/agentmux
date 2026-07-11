@@ -71,7 +71,7 @@ Phase は [実装計画](implementation-plan.md) の P0〜P9 を指す。
 | A06 | OSC/title evidence | tmux format/capture 可能範囲 | planned/adapted | P2 | available evidence を explain に明示 |
 | A07 | local manifest override | XDG config | planned | P2 | invalid file は警告しbundledへfallback |
 | A08 | remote manifest update | versioned HTTPS catalog | planned | P8 | validation/checksum、disable、manual update |
-| A09 | `agent explain` | evidence report | partial | P2 | `explain [--json]`でidentity/state sourceを表示。manifest version/ruleは今後追加 |
+| A09 | `agent explain` | evidence report | partial | P2 | `explain [--json]`でidentity/state sourceとmatched manifest ruleを表示。全rule evidenceは今後追加 |
 | A10 | authority arbitration | lifecycle > screen > process | partial | P2 | state source が競合せずgenerationで切替 |
 | A11 | semantic states | blocked/working/done/idle/unknown | partial | P2 | typed enum、未知値拒否、JSON安定化 |
 | A12 | unseen done | transition + per-client seen | planned | P2/P3 | background完了はdone、閲覧後idle |
@@ -145,6 +145,7 @@ Phase は [実装計画](implementation-plan.md) の P0〜P9 を指す。
 | I03 | lifecycle integrations | Pi/OMP/Kimi/OpenCode/Kilo/Hermes/Mastra | planned | P5 | fixture eventで状態遷移検証 |
 | I04 | session-only integrations | Claude/Codex/Copilot/Devin/Droid/Qoder/Cursor | planned | P5 | state authorityを奪わずsession refだけ保存 |
 | I05 | outdated integration check | embedded integration version | planned | P5/P8 | settings/CLIに更新候補を表示 |
+| I06 | LazyAgent ACP lifecycle | `publish` / owner-safe `withdraw` bridge | implemented/native verified | P2 | buffer ACPのworking/blocked/idle、複数session集約、終了時解除 |
 | N01 | done/blocked sound | local player | planned | P7 | delay後も同stateの場合だけ再生 |
 | N02 | in-drawer toast | TUI overlay | planned | P7 | click/keyでtargetへjump |
 | N03 | terminal notification | OSC escape via caller client | planned | P7 | SSH経由でouter terminalに届く |

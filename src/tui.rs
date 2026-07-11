@@ -19,7 +19,7 @@ use crossterm::{
 use ratatui::{
     Frame, Terminal,
     backend::CrosstermBackend,
-    layout::{Constraint, Direction, Layout, Rect},
+    layout::{Constraint, Direction, Layout, Position, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span, Text},
     widgets::{Block, BorderType, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap},
@@ -36,6 +36,7 @@ use unicode_width::UnicodeWidthStr;
 const SURFACE_DIM: Color = Color::Rgb(30, 30, 46);
 const OVERLAY0: Color = Color::Rgb(108, 112, 134);
 const TEXT: Color = Color::Rgb(205, 214, 244);
+const SUBTEXT1: Color = Color::Rgb(186, 194, 222);
 const SUBTEXT0: Color = Color::Rgb(166, 173, 200);
 const ACCENT: Color = Color::Rgb(137, 180, 250);
 const GREEN: Color = Color::Rgb(166, 227, 161);
@@ -101,6 +102,9 @@ struct App {
     selected_pane: Option<String>,
     show_plain: bool,
     preview: Text<'static>,
+    preview_width: u16,
+    preview_height: u16,
+    preview_cursor: Option<(u16, u16)>,
     status: String,
     prompt: Option<PromptState>,
     confirm: Option<ConfirmAction>,
@@ -179,7 +183,6 @@ fn run_loop(
     let mut last_preview = Instant::now() - preview_interval;
     let mut last_status = Instant::now() - status_interval;
     let mut pending_status = false;
-    let mut pending_preview = false;
 
     loop {
         terminal.draw(|frame| app.render(frame))?;
@@ -187,9 +190,8 @@ fn run_loop(
         if let Some(watcher) = watcher {
             loop {
                 match watcher.try_recv() {
-                    Ok(WatcherEvent::Output(pane)) => {
+                    Ok(WatcherEvent::Output(_)) => {
                         pending_status = true;
-                        pending_preview |= app.selected_pane.as_deref() == Some(pane.as_str());
                     }
                     Ok(WatcherEvent::Topology) => pending_status = true,
                     Ok(WatcherEvent::Error(error)) => {
@@ -200,10 +202,13 @@ fn run_loop(
             }
         }
 
-        if pending_preview && last_preview.elapsed() >= preview_interval {
+        // Published previews (for example LazyAgent's live ACP transcript) can
+        // change without producing bytes on the enclosing tmux pane. Poll the
+        // selected preview at the configured cadence so hidden/scratch buffers
+        // keep following the actual conversation.
+        if last_preview.elapsed() >= preview_interval {
             app.reload_preview(tmux);
             last_preview = Instant::now();
-            pending_preview = false;
         }
         if pending_status && last_status.elapsed() >= status_interval {
             app.reload(tmux);
@@ -322,6 +327,9 @@ impl App {
             selected_pane,
             show_plain: loaded.config.ui.show_plain_panes,
             preview: Text::default(),
+            preview_width: 0,
+            preview_height: 0,
+            preview_cursor: None,
             status: loaded
                 .warning
                 .clone()
@@ -466,16 +474,28 @@ impl App {
     fn reload_preview(&mut self, tmux: &Tmux) {
         let Some(pane) = self.selected_pane.clone() else {
             self.preview = Text::default();
+            self.preview_width = 0;
+            self.preview_height = 0;
+            self.preview_cursor = None;
             return;
         };
-        match tmux.preview(&pane, 120) {
-            Ok(preview) => {
-                self.preview = preview
+        match tmux.pane_view(&pane) {
+            Ok(view) => {
+                self.preview = view
+                    .ansi
                     .as_bytes()
                     .into_text()
-                    .unwrap_or_else(|_| Text::raw(strip_ansi(&preview)));
+                    .unwrap_or_else(|_| Text::raw(strip_ansi(&view.ansi)));
+                self.preview_width = view.width;
+                self.preview_height = view.height;
+                self.preview_cursor = Some((view.cursor_x, view.cursor_y));
             }
-            Err(error) => self.preview = Text::raw(error.to_string()),
+            Err(error) => {
+                self.preview = Text::raw(error.to_string());
+                self.preview_width = 0;
+                self.preview_height = 0;
+                self.preview_cursor = None;
+            }
         }
     }
 
@@ -748,7 +768,7 @@ impl App {
                         Span::styled(space.state.label(), state),
                         Span::styled(
                             format!(" · {} agents", space.agent_count),
-                            Style::default().fg(OVERLAY0).add_modifier(Modifier::DIM),
+                            Style::default().fg(SUBTEXT1),
                         ),
                     ]),
                     Line::default(),
@@ -760,7 +780,7 @@ impl App {
                 Paragraph::new(Span::styled(
                     " spaces",
                     Style::default()
-                        .fg(if active { ACCENT } else { OVERLAY0 })
+                        .fg(if active { ACCENT } else { SUBTEXT0 })
                         .add_modifier(Modifier::BOLD),
                 )),
                 Rect::new(area.x, area.y, area.width, 1),
@@ -821,11 +841,11 @@ impl App {
                         Span::styled(" · ", Style::default().fg(OVERLAY0)),
                         Span::styled(
                             truncate(pane.display_name(), 24),
-                            Style::default().fg(OVERLAY0).add_modifier(Modifier::DIM),
+                            Style::default().fg(SUBTEXT1),
                         ),
                         Span::styled(
                             format!(" · {}", pane.command),
-                            Style::default().fg(OVERLAY0).add_modifier(Modifier::DIM),
+                            Style::default().fg(SUBTEXT1),
                         ),
                     ]),
                     Line::default(),
@@ -845,7 +865,7 @@ impl App {
                     Span::styled(
                         " agents",
                         Style::default()
-                            .fg(if active { ACCENT } else { OVERLAY0 })
+                            .fg(if active { ACCENT } else { SUBTEXT0 })
                             .add_modifier(Modifier::BOLD),
                     ),
                     Span::styled(
@@ -854,7 +874,7 @@ impl App {
                         } else {
                             "  priority"
                         },
-                        Style::default().fg(OVERLAY0).add_modifier(Modifier::DIM),
+                        Style::default().fg(SUBTEXT1),
                     ),
                 ])),
                 Rect::new(area.x, area.y + 1, area.width, 1),
@@ -913,7 +933,7 @@ impl App {
                     truncate(name, 32),
                     Style::default().fg(TEXT).add_modifier(Modifier::BOLD),
                 ),
-                Span::styled("  live · following tail", Style::default().fg(OVERLAY0)),
+                Span::styled("  live · auto-follow", Style::default().fg(SUBTEXT1)),
             ])),
             title_area,
         );
@@ -923,11 +943,22 @@ impl App {
             area.width.saturating_sub(3),
             area.height.saturating_sub(2),
         );
-        let scroll = preview_tail_scroll(&self.preview, inner.width, inner.height);
-        let paragraph = Paragraph::new(self.preview.clone())
-            .scroll((scroll, 0))
-            .wrap(Wrap { trim: false });
+        let scroll = preview_vertical_scroll(self.preview_height, inner.height);
+        let paragraph = Paragraph::new(self.preview.clone()).scroll((scroll, 0));
         frame.render_widget(paragraph, inner);
+        if self.prompt.is_none() && self.confirm.is_none() {
+            if let Some((cursor_x, cursor_y)) = self.preview_cursor {
+                if cursor_x < self.preview_width.min(inner.width)
+                    && cursor_y >= scroll
+                    && cursor_y - scroll < inner.height
+                {
+                    frame.set_cursor_position(Position::new(
+                        inner.x.saturating_add(cursor_x),
+                        inner.y.saturating_add(cursor_y - scroll),
+                    ));
+                }
+            }
+        }
     }
 
     fn render_footer(&self, frame: &mut Frame<'_>, area: Rect) {
@@ -949,7 +980,7 @@ impl App {
         ]);
         let status = Line::from(Span::styled(
             truncate(&self.status, area.width as usize),
-            Style::default().fg(Color::DarkGray),
+            Style::default().fg(SUBTEXT0),
         ));
         frame.render_widget(Paragraph::new(vec![keys, status]), area);
     }
@@ -1074,18 +1105,8 @@ fn preview_is_visible(width: u16, configured_minimum: u16) -> bool {
     width >= configured_minimum
 }
 
-fn preview_tail_scroll(text: &Text<'_>, width: u16, height: u16) -> u16 {
-    if width == 0 || height == 0 {
-        return 0;
-    }
-    let width = usize::from(width);
-    let visual_rows = text.lines.iter().fold(0usize, |rows, line| {
-        let line_width = line.width();
-        rows + line_width.max(1).div_ceil(width)
-    });
-    visual_rows
-        .saturating_sub(usize::from(height))
-        .min(usize::from(u16::MAX)) as u16
+fn preview_vertical_scroll(source_height: u16, viewport_height: u16) -> u16 {
+    source_height.saturating_sub(viewport_height)
 }
 
 fn contains(rect: Rect, column: u16, row: u16) -> bool {
@@ -1153,10 +1174,9 @@ mod tests {
     }
 
     #[test]
-    fn preview_scroll_follows_wrapped_tail() {
-        assert_eq!(preview_tail_scroll(&Text::raw("one\ntwo\nthree"), 20, 2), 1);
-        assert_eq!(preview_tail_scroll(&Text::raw("123456789"), 4, 2), 1);
-        assert_eq!(preview_tail_scroll(&Text::raw("short"), 20, 5), 0);
+    fn preview_crops_visible_screen_from_the_bottom() {
+        assert_eq!(preview_vertical_scroll(40, 24), 16);
+        assert_eq!(preview_vertical_scroll(24, 40), 0);
     }
 
     #[test]

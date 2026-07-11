@@ -1,0 +1,54 @@
+{
+  "version": 1,
+  "hooks": {
+    "sessionStart": [
+      {
+        "type": "command",
+        "bash": "test -z \"${TMUX_PANE:-}\" || agentmux status \"$TMUX_PANE\" idle \"Copilot session started\" 60 >/dev/null 2>&1 || true",
+        "timeoutSec": 3
+      }
+    ],
+    "userPromptSubmitted": [
+      {
+        "type": "command",
+        "bash": "test -z \"${TMUX_PANE:-}\" || agentmux status \"$TMUX_PANE\" working \"Copilot is working\" 3600 >/dev/null 2>&1 || true",
+        "timeoutSec": 3
+      }
+    ],
+    "permissionRequest": [
+      {
+        "type": "command",
+        "bash": "test -z \"${TMUX_PANE:-}\" || agentmux status \"$TMUX_PANE\" blocked \"Copilot needs permission\" 3600 >/dev/null 2>&1 || true",
+        "timeoutSec": 3
+      }
+    ],
+    "postToolUse": [
+      {
+        "type": "command",
+        "bash": "test -z \"${TMUX_PANE:-}\" || agentmux status \"$TMUX_PANE\" working \"Copilot is working\" 3600 >/dev/null 2>&1 || true",
+        "timeoutSec": 3
+      }
+    ],
+    "agentStop": [
+      {
+        "type": "command",
+        "bash": "test -z \"${TMUX_PANE:-}\" || agentmux status \"$TMUX_PANE\" done \"Copilot finished\" 0 >/dev/null 2>&1 || true",
+        "timeoutSec": 3
+      }
+    ],
+    "errorOccurred": [
+      {
+        "type": "command",
+        "bash": "test -z \"${TMUX_PANE:-}\" || agentmux status \"$TMUX_PANE\" blocked \"Copilot reported an error\" 300 >/dev/null 2>&1 || true",
+        "timeoutSec": 3
+      }
+    ],
+    "sessionEnd": [
+      {
+        "type": "command",
+        "bash": "test -z \"${TMUX_PANE:-}\" || agentmux clear-status \"$TMUX_PANE\" >/dev/null 2>&1 || true",
+        "timeoutSec": 3
+      }
+    ]
+  }
+}
