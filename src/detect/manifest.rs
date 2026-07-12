@@ -493,6 +493,18 @@ mod tests {
     }
 
     #[test]
+    fn codex_ignores_stale_shell_confirmation_before_current_prompt() {
+        let screen = ":: Proceed with installation? [Y/n]\npackages installed\n\n› Improve documentation\n\n  gpt-5.6-sol · ~/project\n";
+        let detected = detect("codex", screen, "project").unwrap();
+        assert_eq!(detected.state, AgentState::Idle);
+        assert_ne!(detected.source, "manifest:codex:weak_blocker");
+
+        let live = detect("codex", "› run tests\nDo you want to continue? [y/n]", "").unwrap();
+        assert_eq!(live.state, AgentState::Blocked);
+        assert_eq!(live.source, "manifest:codex:weak_blocker");
+    }
+
+    #[test]
     fn aliases_resolve_to_canonical_ids() {
         assert_eq!(canonical_kind("ghcs"), Some("copilot"));
         assert_eq!(canonical_kind("antigravity-cli"), Some("agy"));

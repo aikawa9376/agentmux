@@ -48,7 +48,9 @@ any = [
 id = "weak_blocker"
 state = "blocked"
 priority = 600
-region = "whole_recent"
+# agentmux extension: ignore stale shell prompts that predate the current Codex
+# prompt while retaining the whole screen fallback when no Codex prompt exists.
+region = "after_last_prompt_marker"
 any = [
   { contains = ["[y/n]"] },
   { contains = ["yes (y)"] },

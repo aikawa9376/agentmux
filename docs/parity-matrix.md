@@ -128,13 +128,13 @@ Phase は [実装計画](implementation-plan.md) の P0〜P9 を指す。
 | X04 | initial session snapshot | topology + state response | planned | P4 | snapshot後subscriptionでraceを回避 |
 | X05 | lifecycle events | daemon event hub | planned | P4 | session/window/pane/agent/worktree/layout |
 | X06 | long-lived subscriptions | bounded fanout | planned | P4 | slow clientが他clientを止めない |
-| X07 | wait output | output event + capture fallback | planned | P4 | literal/regex、future event、timeout |
-| X08 | wait agent status | state event | planned | P4 | subscribe前後のraceなし |
+| X07 | wait output | skill helperの capture polling、将来はoutput event | partial | P4 | literal/regex、future output、timeoutは実装済み。event race解消 |
+| X08 | wait agent status | skill helperのstate polling、将来はstate event | partial | P4 | pane ID/一意nameのwaitは実装済み。subscribe前後のrace解消 |
 | X09 | pane observe/control stream | control-mode bridge | planned | P7 | read-onlyとwriter authorityを分離 |
 | X10 | API schema | schemars JSON Schema | planned | P4 | binaryからschema出力、CI diff |
 | X11 | status diagnostics | daemon/tmux/socket/protocol | planned | P2/P4 | human/JSON の両方 |
 | X12 | shell completion | clap_complete | planned | P8 | bash/zsh/fish/PowerShell/elvish |
-| X13 | agent skill | documented safe recipes | planned | P8 | tmux内判定後のみ自身を操作 |
+| X13 | agent skill | tmux-native orchestration + agentmux identity/state/send | implemented | P4 | tmux内判定、self-pane保護、no-focus split、曖昧target拒否 |
 
 ## Integrations、notifications、configuration
 

@@ -64,6 +64,16 @@ fn watch_inner(
     drop(pair.slave);
     let reader = pair.master.try_clone_reader()?;
     let mut writer = pair.master.take_writer()?;
+    // Remember the private control client's actual name while tmux still has
+    // its control-mode context.  By the time client-detached runs,
+    // #{client_control_mode} may already resolve to 0 (or to another client),
+    // but #{hook_client} still contains this name.  A detach hook can consume
+    // this marker and skip expensive work such as tmux-resurrect saves.
+    writeln!(
+        writer,
+        "set-option -gF @agentmux_control_client_{} '#{{client_name}}'",
+        std::process::id()
+    )?;
     for pane in pane_ids {
         writeln!(writer, "refresh-client -A \"{pane}:on\"")?;
     }

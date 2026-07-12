@@ -1,0 +1,4 @@
+interface:
+  display_name: "Agentmux Orchestration"
+  short_description: "Orchestrate tmux agents, panes, output, and state"
+  default_prompt: "Use $agentmux to delegate work to a sibling tmux agent and wait for its result."

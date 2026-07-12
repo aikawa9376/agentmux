@@ -97,6 +97,7 @@ enum UiCommand {
 
 struct App {
     snapshot: Snapshot,
+    ui_pane_id: Option<String>,
     focus: FocusPanel,
     space_index: usize,
     selected_pane: Option<String>,
@@ -124,11 +125,16 @@ pub fn run(
     // agentmux is a color-semantic TUI: state and captured pane colors carry
     // information, so preserve them even when the parent shell exports NO_COLOR.
     force_color_output(true);
+    // `origin` is the pane from which the sidebar was opened.  It is not the
+    // pane that now hosts this TUI: split-window/new-window give agentmux a new
+    // TMUX_PANE.  Keep both identities so the all-panes view cannot preview the
+    // TUI's own captured screen recursively.
+    let ui_pane_id = env::var("TMUX_PANE").ok();
     let origin = origin
-        .or_else(|| env::var("TMUX_PANE").ok())
+        .or_else(|| ui_pane_id.clone())
         .context("agentmux ui must run inside tmux or receive --origin")?;
     let snapshot = tmux.snapshot()?;
-    let mut app = App::new(snapshot, &tmux, &origin, &loaded)?;
+    let mut app = App::new(snapshot, &tmux, &origin, ui_pane_id, &loaded)?;
     let pane_ids = app
         .snapshot
         .panes
@@ -314,7 +320,13 @@ fn run_loop(
 }
 
 impl App {
-    fn new(snapshot: Snapshot, tmux: &Tmux, origin: &str, loaded: &LoadedConfig) -> Result<Self> {
+    fn new(
+        snapshot: Snapshot,
+        tmux: &Tmux,
+        origin: &str,
+        ui_pane_id: Option<String>,
+        loaded: &LoadedConfig,
+    ) -> Result<Self> {
         let selected_pane = snapshot
             .agents()
             .next()
@@ -322,6 +334,7 @@ impl App {
             .map(|pane| pane.pane_id.clone());
         let mut app = Self {
             snapshot,
+            ui_pane_id,
             focus: FocusPanel::Agents,
             space_index: 0,
             selected_pane,
@@ -357,7 +370,15 @@ impl App {
             .panes
             .iter()
             .enumerate()
-            .filter(|(_, pane)| self.show_plain || !has_agents || pane.is_agent())
+            .filter(|(_, pane)| {
+                pane_is_visible(
+                    &pane.pane_id,
+                    pane.is_agent(),
+                    self.ui_pane_id.as_deref(),
+                    self.show_plain,
+                    has_agents,
+                )
+            })
             .map(|(index, _)| index)
             .collect();
         if !self.show_plain && has_agents {
@@ -1105,6 +1126,16 @@ fn preview_is_visible(width: u16, configured_minimum: u16) -> bool {
     width >= configured_minimum
 }
 
+fn pane_is_visible(
+    pane_id: &str,
+    is_agent: bool,
+    ui_pane_id: Option<&str>,
+    show_plain: bool,
+    has_agents: bool,
+) -> bool {
+    ui_pane_id != Some(pane_id) && (show_plain || !has_agents || is_agent)
+}
+
 fn preview_vertical_scroll(source_height: u16, viewport_height: u16) -> u16 {
     source_height.saturating_sub(viewport_height)
 }
@@ -1183,6 +1214,13 @@ mod tests {
     fn narrow_panes_hide_preview_at_configured_boundary() {
         assert!(!preview_is_visible(119, 120));
         assert!(preview_is_visible(120, 120));
+    }
+
+    #[test]
+    fn all_panes_excludes_the_agentmux_ui_pane() {
+        assert!(!pane_is_visible("%9", false, Some("%9"), true, true));
+        assert!(pane_is_visible("%8", false, Some("%9"), true, true));
+        assert!(pane_is_visible("%8", true, Some("%9"), false, true));
     }
 
     #[test]

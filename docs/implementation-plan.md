@@ -338,6 +338,8 @@ Release candidate: `0.2`。Herdr の中心的な triage UX が完成。
 
 ### P4 — CLI、API、events、wait
 
+Current increment: `skills/agentmux` で tmux-native split/run/read と agentmux-native discovery/state/send を組み合わせるorchestration recipeを実装済み。pollingによる output/status wait も使用可能。daemon event subscriptionとrace-free wait APIは本phaseの残作業。
+
 Deliverables:
 
 - session/window/pane/agent CRUD と directional operations

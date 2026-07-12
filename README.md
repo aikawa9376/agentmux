@@ -93,6 +93,17 @@ Target には `%pane_id`、`session:window.pane`、一意な agent name/kind を
 
 誤検出を調べる場合は `agentmux explain <target>` を使います。agentの識別根拠と状態判定の根拠を別々に表示します。nvimなどeditor内のintegrationは `@agent_kind` と `@agent_status` をpublishすることで検出され、通常のbuffer本文にagent名が書かれているだけでは検出されません。
 
+## Agent orchestration skill
+
+[`skills/agentmux`](skills/agentmux/SKILL.md) に Codex/LazyAgent 向けの orchestration skill があります。pane分割・window/session・layout・process実行は tmux に任せ、agentmux は agent の検出、状態、曖昧性のないtarget解決、prompt送信を担当します。agentmux本体に split wrapper は追加していません。
+
+```sh
+mkdir -p "${CODEX_HOME:-$HOME/.codex}/skills"
+ln -s "$PWD/skills/agentmux" "${CODEX_HOME:-$HOME/.codex}/skills/agentmux"
+```
+
+skillは現在paneを `$TMUX_PANE` で保護し、`tmux split-window -d` でfocusを奪わず sibling agentやtest serverを起動します。`scripts/wait.py` で将来のpane出力またはagentmuxのsemantic stateをtimeout付きで待機できます。
+
 ### GitHub Copilot CLI state
 
 Copilot CLIはprocessだけではworking/doneを安定して公開しないため、公式hookを使います。[contrib/copilot-hooks.json](contrib/copilot-hooks.json)を`~/.copilot/hooks/agentmux.json`として配置するか、同じ`hooks`オブジェクトを`~/.copilot/settings.json`へmergeし、Copilotを再起動してください。
