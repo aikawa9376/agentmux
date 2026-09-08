@@ -160,6 +160,12 @@ fn editor_publish_and_owner_safe_withdraw_flow_into_snapshot() {
             .contains("preview marker")
     );
 
+    fs::remove_file(&preview_path).unwrap();
+    assert!(
+        tmux.pane_view(&pane_id).is_err(),
+        "missing transcript must not expose editor screen"
+    );
+
     assert!(!tmux.withdraw_agent(&pane_id, "someone-else").unwrap());
     assert!(tmux.snapshot().unwrap().pane(&pane_id).unwrap().is_agent());
     assert!(tmux.withdraw_agent(&pane_id, "lazyagent").unwrap());
@@ -180,6 +186,24 @@ fn editor_publish_and_owner_safe_withdraw_flow_into_snapshot() {
     )
     .unwrap();
     assert!(!tmux.snapshot().unwrap().pane(&pane_id).unwrap().is_agent());
+    assert!(tmux.pane_view(&pane_id).is_err());
+    tmux.publish_agent(
+        &pane_id,
+        PublishedAgent {
+            kind: "copilot",
+            name: "starting ACP",
+            state: "idle",
+            message: None,
+            owner: "lazyagent",
+            owner_pid: std::process::id() as i32,
+            preview_path: None,
+        },
+    )
+    .unwrap();
+    assert!(
+        tmux.pane_view(&pane_id).is_err(),
+        "starting ACP must not expose editor screen"
+    );
     assert!(tmux.withdraw_agent(&pane_id, "lazyagent").unwrap());
 }
 

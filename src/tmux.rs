@@ -221,20 +221,24 @@ impl Tmux {
         let width = fields[0].parse().context("invalid pane width")?;
         let height = fields[1].parse().context("invalid pane height")?;
         let owner_pid = fields[5].parse::<i32>().ok();
-        if !fields[4].is_empty()
-            && !fields[6].is_empty()
-            && owner_pid.is_some_and(|pid| pid > 0 && process_alive(pid))
-        {
-            if let Ok(text) = read_preview_tail(fields[4]) {
-                let content_height = text.lines().count().clamp(1, u16::MAX as usize) as u16;
-                return Ok(PaneView {
-                    ansi: colorize_acp_transcript(&text),
-                    width,
-                    height: content_height,
-                    cursor_x: 0,
-                    cursor_y: content_height.saturating_sub(1),
-                });
+        // An owned transcript must never fall back to the editor's current buffer.
+        // A missing/rotating file or a stopped publisher is an unavailable preview.
+        if !fields[4].is_empty() || fields[6] == "lazyagent" {
+            if fields[6].is_empty() || !owner_pid.is_some_and(|pid| pid > 0 && process_alive(pid)) {
+                bail!("Published preview unavailable: publisher is no longer active");
             }
+            if fields[4].is_empty() {
+                bail!("Published preview unavailable: waiting for transcript");
+            }
+            let text = read_preview_tail(fields[4])?;
+            let content_height = text.lines().count().clamp(1, u16::MAX as usize) as u16;
+            return Ok(PaneView {
+                ansi: colorize_acp_transcript(&text),
+                width,
+                height: content_height,
+                cursor_x: 0,
+                cursor_y: content_height.saturating_sub(1),
+            });
         }
         Ok(PaneView {
             ansi: self.run(["capture-pane", "-ep", "-t", pane])?,
