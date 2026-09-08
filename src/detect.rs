@@ -31,6 +31,12 @@ pub fn detect_agent_command(command: &str) -> Option<String> {
     }
 
     const AGENTS: &[(&str, &str)] = &[
+        ("muse-code", "muse"),
+        ("muse-cli", "muse"),
+        ("qwen-code", "qwen"),
+        ("maki", "maki"),
+        ("muse", "muse"),
+        ("qwen", "qwen"),
         ("github-copilot", "copilot"),
         ("antigravity-cli", "agy"),
         ("cursor-agent", "cursor"),
@@ -193,6 +199,16 @@ mod tests {
             detect_agent_command("cursor-agent chat"),
             Some("cursor".into())
         );
+        for (command, kind) in [
+            ("maki", "maki"),
+            ("muse-cli", "muse"),
+            ("muse-code", "muse"),
+            ("node /bin/qwen", "qwen"),
+            ("qwen-code", "qwen"),
+        ] {
+            assert_eq!(detect_agent_command(command).as_deref(), Some(kind));
+        }
+        assert_eq!(detect_agent_command("amusement"), None);
         assert_eq!(detect_agent_command("polybar example"), None);
         assert_eq!(detect_agent_command("vampire"), None);
         assert_eq!(detect_agent_command("ghcs"), Some("copilot".into()));

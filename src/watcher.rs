@@ -3,7 +3,7 @@ use anyhow::Result;
 use portable_pty::{CommandBuilder, PtySize, native_pty_system};
 use std::{
     io::{BufRead, BufReader, Write},
-    sync::mpsc::{self, Receiver, Sender},
+    sync::mpsc::{self, Receiver, SyncSender, TrySendError},
     thread,
 };
 
@@ -17,7 +17,7 @@ pub enum WatcherEvent {
 pub fn start(tmux: &Tmux, origin: &str, pane_ids: Vec<String>) -> Result<Receiver<WatcherEvent>> {
     let session = tmux.session_for_pane(origin)?;
     let socket_name = tmux.socket_name().map(str::to_owned);
-    let (sender, receiver) = mpsc::channel();
+    let (sender, receiver) = mpsc::sync_channel(256);
     thread::Builder::new()
         .name("agentmux-tmux-control".into())
         .spawn(move || watch(socket_name, session, pane_ids, sender))?;
@@ -28,10 +28,10 @@ fn watch(
     socket_name: Option<String>,
     session: String,
     pane_ids: Vec<String>,
-    sender: Sender<WatcherEvent>,
+    sender: SyncSender<WatcherEvent>,
 ) {
     if let Err(error) = watch_inner(socket_name, session, pane_ids, &sender) {
-        let _ = sender.send(WatcherEvent::Error(error.to_string()));
+        let _ = sender.try_send(WatcherEvent::Error(error.to_string()));
     }
 }
 
@@ -39,7 +39,7 @@ fn watch_inner(
     socket_name: Option<String>,
     session: String,
     pane_ids: Vec<String>,
-    sender: &Sender<WatcherEvent>,
+    sender: &SyncSender<WatcherEvent>,
 ) -> Result<()> {
     let tmux = Tmux::new(socket_name.clone());
     let pair = native_pty_system().openpty(PtySize {
@@ -88,7 +88,7 @@ fn watch_inner(
         }
         let line = String::from_utf8_lossy(&bytes);
         if let Some(pane) = output_pane(&line) {
-            if sender.send(WatcherEvent::Output(pane.to_owned())).is_err() {
+            if !notify(sender, WatcherEvent::Output(pane.to_owned())) {
                 break;
             }
         } else if is_topology_event(&line) {
@@ -98,7 +98,7 @@ fn watch_inner(
                 }
                 writer.flush()?;
             }
-            if sender.send(WatcherEvent::Topology).is_err() {
+            if !notify(sender, WatcherEvent::Topology) {
                 break;
             }
         }
@@ -107,6 +107,12 @@ fn watch_inner(
     let _ = child.kill();
     let _ = child.wait();
     Ok(())
+}
+
+// A full queue already guarantees a refresh. Never block the control reader
+// behind rendering; the periodic snapshot also recovers dropped topology events.
+fn notify(sender: &SyncSender<WatcherEvent>, event: WatcherEvent) -> bool {
+    !matches!(sender.try_send(event), Err(TrySendError::Disconnected(_)))
 }
 
 fn output_pane(line: &str) -> Option<&str> {
@@ -137,6 +143,16 @@ fn is_topology_event(line: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn busy_reader_drops_redundant_events_without_blocking() {
+        let (sender, receiver) = mpsc::sync_channel(1);
+        assert!(notify(&sender, WatcherEvent::Topology));
+        assert!(notify(&sender, WatcherEvent::Output("%1".into())));
+        assert_eq!(receiver.try_iter().count(), 1);
+        drop(receiver);
+        assert!(!notify(&sender, WatcherEvent::Topology));
+    }
 
     #[test]
     fn parses_output_notifications() {

@@ -9,3 +9,13 @@ License: GNU Affero General Public License v3.0 or later
 
 The Copilot folder-trust rule in github-copilot.toml is an agentmux extension.
 See LICENSE for the complete license text.
+
+Detection manifests refreshed from https://github.com/herdrdev/herdr
+Revision: 9e01168b140ce8e3821131345dc82bc2bf9994eb (v0.9.0-era master)
+Upstream license at this revision: Apache License 2.0
+The license text is included in licenses/Herdr-Apache-2.0.txt.
+Updated/new manifests: amp, claude, codex, cursor, github-copilot, grok,
+hermes, kiro, maki, muse, qwen. Other manifests are unchanged from v0.7.3.
+Local modification: github-copilot retains the agentmux folder-trust rule.
+The detector remains adapted from the original AGPL-3.0-or-later source;
+agentmux's overall license remains AGPL-3.0-or-later.

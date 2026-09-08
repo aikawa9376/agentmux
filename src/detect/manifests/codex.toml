@@ -1,7 +1,7 @@
 id = "codex"
-version = "2026.06.10.3"
-min_engine_version = 2
-updated_at = "2026-06-10T00:00:00Z"
+version = "2026.09.05.1"
+min_engine_version = 3
+updated_at = "2026-09-05T00:00:00Z"
 
 [[rules]]
 id = "osc_title_blocked"
@@ -17,7 +17,7 @@ state = "working"
 priority = 1050
 region = "osc_title"
 visible_working = true
-regex = ['^[\x{2800}-\x{28FF}] ']
+regex = ['(?:^| )[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏](?: |$)']
 
 [[rules]]
 id = "transcript_viewer"
@@ -30,6 +30,26 @@ any = [
   { contains = ["esc to edit prev"] },
   { contains = ["esc/← to edit prev"] },
 ]
+
+[[rules]]
+id = "trust_directory"
+state = "blocked"
+priority = 950
+region = "top_non_empty_lines(20)"
+visible_blocker = true
+all = [
+  { regex = ['\A> You are in [^\r\n]+(?:\r?\n|$)'] },
+  { regex = ['(?s)Do\s+you\s+trust\s+the\s+contents\s+of\s+this\s+directory\?'] },
+]
+
+[[rules]]
+id = "startup_update"
+state = "blocked"
+priority = 950
+region = "bottom_non_empty_lines(20)"
+visible_blocker = true
+contains = ["Update available!", "Update now"]
+regex = ['Skip\s+until\s+next\s+version', 'Press enter to continue\s*\z']
 
 [[rules]]
 id = "live_strong_blocker"
@@ -48,15 +68,22 @@ any = [
 id = "weak_blocker"
 state = "blocked"
 priority = 600
-# agentmux extension: ignore stale shell prompts that predate the current Codex
-# prompt while retaining the whole screen fallback when no Codex prompt exists.
-region = "after_last_prompt_marker"
+region = "whole_recent_without_current_prompt_marker"
 any = [
   { contains = ["[y/n]"] },
   { contains = ["yes (y)"] },
   { contains = ["do you want to"], any = [{ contains = ["yes"] }, { contains = ["❯"] }] },
   { contains = ["would you like to"], any = [{ contains = ["yes"] }, { contains = ["❯"] }] },
 ]
+
+[[rules]]
+id = "screen_working_fallback"
+state = "working"
+priority = 500
+region = "bottom_non_empty_lines(3)"
+visible_working = true
+line_regex = ['^[•◦]\s+Working \([^)]*esc to interrupt\)(?: · .*)?$']
+not = [{ contains = ["■ Conversation interrupted"] }]
 
 [[rules]]
 id = "osc_title_idle"
@@ -66,6 +93,6 @@ region = "osc_title"
 visible_idle = true
 regex = ['\S']
 not = [
-  { regex = ['^[\x{2800}-\x{28FF}]'] },
+  { regex = ['(?:^| )[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏](?: |$)'] },
   { contains = ["Action Required"] },
 ]

@@ -113,6 +113,7 @@ struct App {
     agent_rows: Vec<(Rect, String)>,
     workspace_ratio: f32,
     preview_min_width: u16,
+    preview_visible: bool,
     animation_frame: usize,
 }
 
@@ -194,7 +195,7 @@ fn run_loop(
         terminal.draw(|frame| app.render(frame))?;
 
         if let Some(watcher) = watcher {
-            loop {
+            for _ in 0..256 {
                 match watcher.try_recv() {
                     Ok(WatcherEvent::Output(_)) => {
                         pending_status = true;
@@ -216,7 +217,7 @@ fn run_loop(
             app.reload_preview(tmux);
             last_preview = Instant::now();
         }
-        if pending_status && last_status.elapsed() >= status_interval {
+        if status_refresh_due(pending_status, last_status.elapsed(), status_interval) {
             app.reload(tmux);
             last_status = Instant::now();
             pending_status = false;
@@ -353,6 +354,7 @@ impl App {
             agent_rows: Vec::new(),
             workspace_ratio: loaded.config.ui.workspace_ratio,
             preview_min_width: loaded.config.ui.preview_min_width,
+            preview_visible: false,
             animation_frame: 0,
         };
         if app.snapshot.pane(origin).is_some() {
@@ -493,6 +495,9 @@ impl App {
     }
 
     fn reload_preview(&mut self, tmux: &Tmux) {
+        if !self.preview_visible {
+            return;
+        }
         let Some(pane) = self.selected_pane.clone() else {
             self.preview = Text::default();
             self.preview_width = 0;
@@ -739,7 +744,8 @@ impl App {
             .direction(Direction::Vertical)
             .constraints([Constraint::Min(5), Constraint::Length(2)])
             .split(frame.area());
-        let body = if preview_is_visible(outer[0].width, self.preview_min_width) {
+        self.preview_visible = preview_is_visible(outer[0].width, self.preview_min_width);
+        let body = if self.preview_visible {
             let columns = Layout::default()
                 .direction(Direction::Horizontal)
                 .constraints([Constraint::Percentage(38), Constraint::Percentage(62)])
@@ -1122,6 +1128,12 @@ fn key_style() -> Style {
     Style::default().fg(ACCENT).add_modifier(Modifier::BOLD)
 }
 
+// Pane-option reports, TTL expiry, exited owners and a disconnected watcher
+// need reconciliation even when the terminal emits no output.
+fn status_refresh_due(pending: bool, elapsed: Duration, interval: Duration) -> bool {
+    elapsed >= interval && (pending || elapsed >= Duration::from_secs(2))
+}
+
 fn preview_is_visible(width: u16, configured_minimum: u16) -> bool {
     width >= configured_minimum
 }
@@ -1191,6 +1203,24 @@ fn truncate(value: &str, width: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn status_refresh_reconciles_silent_updates_and_limits_bursts() {
+        let interval = Duration::from_millis(250);
+        assert!(!status_refresh_due(
+            true,
+            Duration::from_millis(249),
+            interval
+        ));
+        assert!(status_refresh_due(true, interval, interval));
+        assert!(!status_refresh_due(false, interval, interval));
+        assert!(status_refresh_due(false, Duration::from_secs(2), interval));
+        assert!(!status_refresh_due(
+            false,
+            Duration::from_secs(2),
+            Duration::from_secs(3)
+        ));
+    }
 
     #[test]
     fn offset_wraps() {

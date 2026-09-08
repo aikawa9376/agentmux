@@ -141,16 +141,19 @@ status_ms = 250
 
 UI全体の幅が`preview_min_width`未満ならpreviewを描画せず、spaces/agents sidebarだけを全幅表示します。previewはtmuxの現在のvisible cell gridを`capture-pane -e`で取得し、foreground/background color、太字、italic、underline、元の改行境界、cursor位置を復元します。再wrapやscrollback連結は行いません。agentmux自身は背景色を指定せず、terminalの背景を継承します。
 
+非表示のpreviewは取得しません。状態は出力イベントで更新し、無出力時も `max(status_ms, 2000)` ミリ秒間隔で再確認するため、pane optionの変更・TTL期限切れ・watcher停止からも追従します。
+
 これはcell snapshotの同期表示であり、tmux paneそのものの複製ではありません。sixel/kitty画像、OSC hyperlink、IME、application固有のcursor形状、非常に短い出力後の空白領域などは完全には再現できません。
 
 ## Current boundary
 
-このバージョンは「tmuxで使えるHerdr風サイドバー」の基礎です。Herdr v0.7.3由来のagent別manifestで画面状態を判定します。永続daemon、`done = idle + unseen`、通知、worktree、plugin、remote thin clientは次のphaseです。tmux自身が提供するPTY、session永続化、layout、copy-modeは再実装しません。
+このバージョンは「tmuxで使えるHerdr風サイドバー」の基礎です。Herdr v0.9.0時点の21個のagent別manifestで画面状態を判定します（Maki・Muse・Qwen対応）。OSC progressはtmuxから取得できないため判定対象外です。永続daemon、`done = idle + unseen`、通知、worktree、plugin、remote thin clientは次のphaseです。tmux自身が提供するPTY、session永続化、layout、copy-modeは再実装しません。
 
 設計・調査文書:
 
+- [2026-09-08 本家追従・性能調査](docs/research/herdr-v0.9.0.md)
 - [Herdr 機能調査](docs/research/herdr-v0.7.3.md)
 - [機能 parity matrix](docs/parity-matrix.md)
 - [実装計画](docs/implementation-plan.md)
 
-ライセンスは `AGPL-3.0-or-later` です。状態判定エンジンとmanifestはHerdr v0.7.3を移植しており、固定した派生元は [NOTICE](NOTICE) に記録しています。ロゴ、音源などのブランドassetは含めていません。
+ライセンスは `AGPL-3.0-or-later` です。状態判定エンジンはHerdr v0.7.3由来で、manifestの更新元・個別ライセンスを含めた固定した派生元は [NOTICE](NOTICE) に記録しています。ロゴ、音源などのブランドassetは含めていません。

@@ -1,21 +1,8 @@
 id = "copilot"
-version = "2026.07.07.1"
+version = "2026.08.29.1"
 min_engine_version = 1
-updated_at = "2026-07-07T14:15:00Z"
+updated_at = "2026-08-29T00:00:00Z"
 aliases = ["github-copilot", "ghcs"]
-
-# agentmux extension: this dialog can appear before lifecycle hooks are active.
-[[rules]]
-id = "folder_trust_blocker"
-state = "blocked"
-priority = 320
-region = "whole_recent"
-visible_blocker = true
-contains = ["confirm folder trust", "do you trust the files"]
-any = [
-  { contains = ["enter to select"] },
-  { contains = ["yes"] },
-]
 
 [[rules]]
 id = "selection_blocker"
@@ -37,6 +24,14 @@ all = [
 ]
 
 [[rules]]
+id = "background_agents_working"
+state = "working"
+priority = 110
+region = "bottom_non_empty_lines(6)"
+visible_working = true
+line_regex = ['^\s*◎\s+Waiting for background agents(?:\s|·|$)']
+
+[[rules]]
 id = "working_cancel_hint"
 state = "working"
 priority = 100
@@ -47,4 +42,17 @@ any = [
   { contains = ["esc cancel"] },
   { contains = ["esc again to cancel"] },
   { contains = ["esc interrupt"] }
+]
+
+# agentmux extension: this dialog can appear before lifecycle hooks are active.
+[[rules]]
+id = "folder_trust_blocker"
+state = "blocked"
+priority = 320
+region = "whole_recent"
+visible_blocker = true
+contains = ["confirm folder trust", "do you trust the files"]
+any = [
+  { contains = ["enter to select"] },
+  { contains = ["yes"] },
 ]

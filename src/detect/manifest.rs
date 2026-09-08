@@ -16,7 +16,6 @@ struct Manifest {
     id: String,
     #[allow(dead_code)]
     version: Option<String>,
-    #[allow(dead_code)]
     min_engine_version: Option<u32>,
     #[serde(rename = "updated_at")]
     #[allow(dead_code)]
@@ -100,6 +99,7 @@ impl From<ManifestState> for AgentState {
 #[derive(Debug)]
 struct CompiledManifest {
     id: String,
+    aliases: Vec<String>,
     rules: Vec<CompiledRule>,
 }
 
@@ -136,6 +136,9 @@ const BUNDLED: &[(&str, &str)] = &[
     ("kimi", include_str!("manifests/kimi.toml")),
     ("kiro", include_str!("manifests/kiro.toml")),
     ("opencode", include_str!("manifests/opencode.toml")),
+    ("maki", include_str!("manifests/maki.toml")),
+    ("muse", include_str!("manifests/muse.toml")),
+    ("qwen", include_str!("manifests/qwen.toml")),
     ("pi", include_str!("manifests/pi.toml")),
     ("qodercli", include_str!("manifests/qodercli.toml")),
 ];
@@ -144,10 +147,9 @@ static MANIFESTS: OnceLock<HashMap<String, CompiledManifest>> = OnceLock::new();
 
 pub(super) fn canonical_kind(label: &str) -> Option<&'static str> {
     let lower = label.trim().to_ascii_lowercase();
-    BUNDLED.iter().find_map(|(id, source)| {
-        let manifest: Manifest = toml::from_str(source).ok()?;
+    manifests().iter().find_map(|(id, manifest)| {
         (manifest.id == lower || manifest.aliases.iter().any(|alias| alias == &lower))
-            .then_some(*id)
+            .then_some(id.as_str())
     })
 }
 
@@ -188,6 +190,10 @@ fn manifests() -> &'static HashMap<String, CompiledManifest> {
             .map(|(id, source)| {
                 let parsed: Manifest = toml::from_str(source)
                     .unwrap_or_else(|error| panic!("invalid bundled {id} manifest: {error}"));
+                assert!(
+                    parsed.min_engine_version.unwrap_or(1) <= 3,
+                    "unsupported engine version in {id}"
+                );
                 let rules = parsed
                     .rules
                     .into_iter()
@@ -208,6 +214,7 @@ fn manifests() -> &'static HashMap<String, CompiledManifest> {
                     (*id).to_owned(),
                     CompiledManifest {
                         id: parsed.id,
+                        aliases: parsed.aliases,
                         rules,
                     },
                 )
@@ -252,19 +259,29 @@ fn compile_gate(gate: Gate) -> Result<CompiledGate, regex::Error> {
 }
 
 fn gate_matches(gate: &CompiledGate, text: &str) -> bool {
-    let lower = text.to_lowercase();
+    gate_matches_lower(gate, text, &text.to_lowercase())
+}
+
+fn gate_matches_lower(gate: &CompiledGate, text: &str, lower: &str) -> bool {
     gate.contains.iter().all(|needle| lower.contains(needle))
         && gate.regex.iter().all(|regex| regex.is_match(text))
         && gate
             .line_regex
             .iter()
             .all(|regex| text.lines().any(|line| regex.is_match(line)))
-        && gate.all.iter().all(|nested| gate_matches(nested, text))
-        && (gate.any.is_empty() || gate.any.iter().any(|nested| gate_matches(nested, text)))
+        && gate
+            .all
+            .iter()
+            .all(|nested| gate_matches_lower(nested, text, lower))
+        && (gate.any.is_empty()
+            || gate
+                .any
+                .iter()
+                .any(|nested| gate_matches_lower(nested, text, lower)))
         && !gate
             .not_gate
             .iter()
-            .any(|nested| gate_matches(nested, text))
+            .any(|nested| gate_matches_lower(nested, text, lower))
 }
 
 fn default_region() -> String {
@@ -299,6 +316,10 @@ fn region<'a>(screen: &'a str, osc_title: &'a str, spec: &str) -> &'a str {
                 region_count(value, "bottom_non_empty_lines")
                     .map(|count| bottom_non_empty_lines(screen, count))
             })
+            .or_else(|| {
+                region_count(value, "top_non_empty_lines")
+                    .map(|count| top_non_empty_lines(screen, count))
+            })
             .unwrap_or(""),
     }
 }
@@ -309,6 +330,23 @@ fn region_count(spec: &str, name: &str) -> Option<usize> {
         .strip_suffix(')')?
         .parse()
         .ok()
+}
+
+fn top_non_empty_lines(content: &str, count: usize) -> &str {
+    let mut remaining = count;
+    let mut end = 0;
+    let mut offset = 0;
+    for line in content.split_inclusive('\n') {
+        if remaining == 0 {
+            break;
+        }
+        offset += line.len();
+        if !line.trim().is_empty() {
+            end = offset;
+            remaining -= 1;
+        }
+    }
+    &content[..end]
 }
 
 fn bottom_lines(content: &str, count: usize) -> &str {
@@ -437,16 +475,108 @@ fn slice_from_line<'a>(content: &'a str, lines: &[&str], index: usize) -> &'a st
 }
 
 fn line_offset(content: &str, lines: &[&str], index: usize) -> usize {
-    lines[..index.min(lines.len())]
-        .iter()
-        .map(|line| line.len() + 1)
-        .sum::<usize>()
-        .min(content.len())
+    lines.get(index).map_or(content.len(), |line| {
+        line.as_ptr() as usize - content.as_ptr() as usize
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn current_upstream_ui_states() {
+        let fixtures = [
+            ("claude", "", "◐ project", AgentState::Working),
+            (
+                "claude",
+                "MCP server \"tools\" requests your input\n❯ Accept\nEsc to cancel",
+                "",
+                AgentState::Blocked,
+            ),
+            (
+                "claude",
+                "✻ Waiting for 2 background agents to finish\n────\n❯\n────",
+                "",
+                AgentState::Working,
+            ),
+            (
+                "copilot",
+                "◎ Waiting for background agents · 10s",
+                "",
+                AgentState::Working,
+            ),
+            (
+                "codex",
+                "Update available!\n1. Update now\n2. Skip until next version\nPress enter to continue",
+                "",
+                AgentState::Blocked,
+            ),
+            (
+                "codex",
+                "> You are in /tmp/project\nDo you trust the contents of this directory?",
+                "",
+                AgentState::Blocked,
+            ),
+            (
+                "codex",
+                "• Working (2s · esc to interrupt)",
+                "project",
+                AgentState::Working,
+            ),
+            ("codex", "› Explain the text [y/n]", "", AgentState::Idle),
+            ("grok", "· 2 │ project", "grok", AgentState::Working),
+            ("amp", "", "Plugin confirmation needed", AgentState::Blocked),
+            ("hermes", "", "⏳ project", AgentState::Working),
+            ("maki", " ⠋ [BUILD] project", "", AgentState::Working),
+            ("maki", " [PLAN] project", "", AgentState::Idle),
+            (
+                "muse-cli",
+                "Enter to select · Tab for an optional note · Esc to interrupt",
+                "",
+                AgentState::Blocked,
+            ),
+            (
+                "muse",
+                "◆ Working (2s · esc to interrupt)",
+                "",
+                AgentState::Working,
+            ),
+            ("muse", "⟩", "", AgentState::Idle),
+            (
+                "qwen-code",
+                "⠏ ユーザーの確認を待っています...",
+                "",
+                AgentState::Blocked,
+            ),
+            ("qwen", "", "◐ project", AgentState::Working),
+        ];
+        for (kind, screen, title, expected) in fixtures {
+            assert_eq!(
+                detect(kind, screen, title).unwrap().state,
+                expected,
+                "{kind}: {screen}"
+            );
+        }
+    }
+
+    #[test]
+    fn regions_preserve_crlf_and_unicode_boundaries() {
+        let screen = "日本語\r\n\r\n次の行\r\n末尾";
+        assert_eq!(region(screen, "", "bottom_lines(2)"), "次の行\r\n末尾");
+        assert_eq!(
+            region(screen, "", "top_non_empty_lines(2)"),
+            "日本語\r\n\r\n次の行\r\n"
+        );
+        assert_eq!(region(screen, "", "top_non_empty_lines(0)"), "");
+        assert_eq!(region(" \n\n", "", "top_non_empty_lines(2)"), "");
+        assert_eq!(region("a\n\n", "", "top_non_empty_lines(2)"), "a\n");
+        assert_eq!(region(screen, "", "bottom_lines(0)"), "");
+        assert_eq!(
+            region("same\nsame\nlast", "", "top_non_empty_lines(2)"),
+            "same\nsame\n"
+        );
+    }
 
     #[test]
     fn every_bundled_manifest_compiles() {
@@ -499,7 +629,12 @@ mod tests {
         assert_eq!(detected.state, AgentState::Idle);
         assert_ne!(detected.source, "manifest:codex:weak_blocker");
 
-        let live = detect("codex", "› run tests\nDo you want to continue? [y/n]", "").unwrap();
+        let live = detect(
+            "codex",
+            "› run tests\n• Running command\nDo you want to continue? [y/n]",
+            "",
+        )
+        .unwrap();
         assert_eq!(live.state, AgentState::Blocked);
         assert_eq!(live.source, "manifest:codex:weak_blocker");
     }

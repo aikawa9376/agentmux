@@ -1,8 +1,8 @@
 # Herdr → agentmux parity matrix
 
-比較基準: Herdr v0.7.3 + master `c8850a2`、2026-07-10
+比較基準: 当初Herdr v0.7.3 + master `c8850a2`。2026-09-08にv0.9.0時点のmaster `9e01168`を追加調査（[差分と今回の範囲](research/herdr-v0.9.0.md)）。
 
-実装状況更新: 2026-07-11。`implemented` はRust MVPで実装・test済み、`partial` は同じ利用目的の一部まで実装済みを表す。
+実装状況更新: 2026-09-08（検出と更新ループを再検証、その他は2026-07-11時点）。`implemented` はRust MVPで実装・test済み、`partial` は同じ利用目的の一部まで実装済みを表す。
 
 この表は「Herdr の source を同じ構造で作り直す」表ではない。利用者から見える capability を、tmux native、agentmux 実装、または tmux 向けの適応のどれで満たすかを追跡する。
 
@@ -64,10 +64,10 @@ Phase は [実装計画](implementation-plan.md) の P0〜P9 を指す。
 | ID | Herdr capability | tmux/agentmux での対応 | 現状 | Phase | 受入条件 |
 | --- | --- | --- | --- | --- | --- |
 | A01 | foreground agent detection | tmux format + TTY process tree | implemented | P1/P2 | wrapper/runtime越しも検出 |
-| A02 | supported agent catalog | 20 agent の process matcher | partial | P2 | 公式一覧を fixture で網羅 |
+| A02 | supported agent catalog | 21 manifest + その他の process matcher | partial | P2 | 公式一覧を fixture で網羅 |
 | A03 | manual agent mark | tmux pane options | implemented | P1 | mark/unmark が現行 option と互換 |
 | A04 | VM/sandbox hint | `@agent_kind` / env hint | partial | P2 | hidden processでも指定manifestを使える |
-| A05 | screen manifest detection | TOML rule engine | planned | P2 | region/gate/matcher、safe fallback |
+| A05 | screen manifest detection | TOML rule engine | implemented | P2 | 21 manifest、nested gates、engine v3 top region、UI fixture tests |
 | A06 | OSC/title evidence | tmux format/capture 可能範囲 | planned/adapted | P2 | available evidence を explain に明示 |
 | A07 | local manifest override | XDG config | planned | P2 | invalid file は警告しbundledへfallback |
 | A08 | remote manifest update | versioned HTTPS catalog | planned | P8 | validation/checksum、disable、manual update |
