@@ -29,6 +29,13 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Commands {
+    /// Serve a token-protected, read-only LAN mirror.
+    Serve {
+        #[arg(long, default_value = "127.0.0.1:9876")]
+        bind: std::net::SocketAddr,
+        #[arg(long)]
+        token_file: Option<std::path::PathBuf>,
+    },
     /// Open the interactive sidebar.
     #[command(alias = "menu")]
     Ui {
@@ -140,6 +147,9 @@ fn main() -> Result<()> {
         origin: None,
         client: None,
     }) {
+        Commands::Serve { bind, token_file } => {
+            agentmux::remote::serve(tmux, bind, token_file.as_deref())?;
+        }
         Commands::Ui { origin, client } => {
             tui::run(tmux, origin, client, LoadedConfig::load())?;
         }

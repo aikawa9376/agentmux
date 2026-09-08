@@ -30,7 +30,7 @@ pub struct Tmux {
     socket_name: Option<String>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct PaneView {
     pub ansi: String,
     pub width: u16,
