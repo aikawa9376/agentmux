@@ -48,7 +48,7 @@ tmuxの`source-file`は差分適用です。設定から削除した古いbindin
 | --- | --- |
 | `Tab` | spaces / agents panel の切替 |
 | `j`, `k`, arrows | 選択移動 |
-| `Enter` | 選択した session/pane を focus |
+| `Enter` | 選択した session/pane を focus（agentmuxは終了しない） |
 | `a` | agent-only / all panes の切替 |
 | `r`, `Ctrl-g` | 即時 refresh |
 | `Alt-c` / `Alt-l` / `Alt-o` | Codex / Claude / OpenCode を split 起動 |
@@ -58,6 +58,8 @@ tmuxの`source-file`は差分適用です。設定から削除した古いbindin
 | `Ctrl-k` | pane を確認付き kill |
 | `Ctrl-m` / `Ctrl-u` | agent metadata を設定 / 解除 |
 | `q`, `Esc` | sidebar を閉じる |
+
+agent-only表示はagentが0件でも通常paneへ切り替わりません。`a`で明示的にall panesへ切り替えられます。別windowへ移動した場合、agentmuxは元のwindowに残ります。
 
 ## CLI compatibility
 

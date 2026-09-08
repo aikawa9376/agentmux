@@ -253,10 +253,10 @@ fn run_loop(
                 app.reload_preview(tmux);
                 last_status = Instant::now();
             }
-            UiCommand::Focus(pane) => {
-                tmux.focus_pane(&pane, client)?;
-                break;
-            }
+            UiCommand::Focus(pane) => match tmux.focus_pane(&pane, client) {
+                Ok(()) => app.status = format!("Focused {pane}"),
+                Err(error) => app.status = error.to_string(),
+            },
             UiCommand::Spawn {
                 kind,
                 command,
@@ -366,7 +366,6 @@ impl App {
     }
 
     fn visible_pane_indices(&self) -> Vec<usize> {
-        let has_agents = self.snapshot.panes.iter().any(PaneRecord::is_agent);
         let mut indices: Vec<_> = self
             .snapshot
             .panes
@@ -378,12 +377,11 @@ impl App {
                     pane.is_agent(),
                     self.ui_pane_id.as_deref(),
                     self.show_plain,
-                    has_agents,
                 )
             })
             .map(|(index, _)| index)
             .collect();
-        if !self.show_plain && has_agents {
+        if !self.show_plain {
             indices.sort_by(|left, right| {
                 let left = &self.snapshot.panes[*left];
                 let right = &self.snapshot.panes[*right];
@@ -446,6 +444,11 @@ impl App {
 
     fn ensure_visible_selection(&mut self) {
         let visible = self.visible_pane_indices();
+        let panes: Vec<_> = visible
+            .iter()
+            .map(|index| self.snapshot.panes[*index].clone())
+            .collect();
+        self.snapshot.spaces = Snapshot::build_spaces(&panes);
         let selected_is_visible = self.selected_pane.as_ref().is_some_and(|selected| {
             visible
                 .iter()
@@ -1143,9 +1146,8 @@ fn pane_is_visible(
     is_agent: bool,
     ui_pane_id: Option<&str>,
     show_plain: bool,
-    has_agents: bool,
 ) -> bool {
-    ui_pane_id != Some(pane_id) && (show_plain || !has_agents || is_agent)
+    ui_pane_id != Some(pane_id) && (show_plain || is_agent)
 }
 
 fn preview_vertical_scroll(source_height: u16, viewport_height: u16) -> u16 {
@@ -1235,6 +1237,12 @@ mod tests {
     }
 
     #[test]
+    fn agent_only_never_falls_back_to_plain_panes() {
+        assert!(!pane_is_visible("%8", false, None, false));
+        assert!(pane_is_visible("%8", false, None, true));
+    }
+
+    #[test]
     fn preview_crops_visible_screen_from_the_bottom() {
         assert_eq!(preview_vertical_scroll(40, 24), 16);
         assert_eq!(preview_vertical_scroll(24, 40), 0);
@@ -1248,9 +1256,9 @@ mod tests {
 
     #[test]
     fn all_panes_excludes_the_agentmux_ui_pane() {
-        assert!(!pane_is_visible("%9", false, Some("%9"), true, true));
-        assert!(pane_is_visible("%8", false, Some("%9"), true, true));
-        assert!(pane_is_visible("%8", true, Some("%9"), false, true));
+        assert!(!pane_is_visible("%9", false, Some("%9"), true));
+        assert!(pane_is_visible("%8", false, Some("%9"), true));
+        assert!(pane_is_visible("%8", true, Some("%9"), false));
     }
 
     #[test]
