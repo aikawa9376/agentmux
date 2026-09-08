@@ -2,3 +2,7 @@
 *.log
 .DS_Store
 
+/android/.gradle/
+/android/.kotlin/
+/android/local.properties
+/android/**/build/

@@ -61,6 +61,10 @@ tmuxの`source-file`は差分適用です。設定から削除した古いbindin
 
 agent-only表示はagentが0件でも通常paneへ切り替わりません。`a`で明示的にall panesへ切り替えられます。別windowへ移動した場合、agentmuxは元のwindowに残ります。
 
+## Android / LAN mirror
+
+同梱の[Androidアプリ](android/README.md)からagent一覧と画面を閲覧できます。PC側で `agentmux serve --bind 0.0.0.0:9876` を起動し、AndroidにPCのLAN IPと表示されたトークンを入力します。閲覧専用で、ブラウザからも利用できます。
+
 ## CLI compatibility
 
 既存 Bash 版と同じ主要コマンドを維持しています。
@@ -149,7 +153,7 @@ UI全体の幅が`preview_min_width`未満ならpreviewを描画せず、spaces/
 
 ## Current boundary
 
-このバージョンは「tmuxで使えるHerdr風サイドバー」の基礎です。Herdr v0.9.0時点の21個のagent別manifestで画面状態を判定します（Maki・Muse・Qwen対応）。OSC progressはtmuxから取得できないため判定対象外です。永続daemon、`done = idle + unseen`、通知、worktree、plugin、remote thin clientは次のphaseです。tmux自身が提供するPTY、session永続化、layout、copy-modeは再実装しません。
+このバージョンは「tmuxで使えるHerdr風サイドバー」の基礎です。Herdr v0.9.0時点の21個のagent別manifestで画面状態を判定します（Maki・Muse・Qwen対応）。OSC progressはtmuxから取得できないため判定対象外です。永続daemon、`done = idle + unseen`、通知、worktree、pluginは次のphaseです。LAN向けの閲覧専用thin clientは `android/` と `web/` に実装しています。tmux自身が提供するPTY、session永続化、layout、copy-modeは再実装しません。
 
 設計・調査文書:
 
