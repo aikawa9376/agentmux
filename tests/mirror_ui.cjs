@@ -1,0 +1,71 @@
+// NODE_PATH=/tmp/agentmux-web-check/node_modules node tests/mirror_ui.cjs
+const { chromium } = require('playwright');
+const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const path = require('node:path');
+(async () => {
+  const browser = await chromium.launch({executablePath:process.env.CHROMIUM_PATH,headless:true,args:['--no-sandbox']});
+  try {
+    const page=await browser.newPage({viewport:{width:900,height:900}});
+    const errors=[];page.on('pageerror',error=>errors.push(error.message));
+    const panes=[1,2].map(id=>({pane_id:`%${id}`,agent_name:`Agent ${id}`,agent_kind:'codex',state:'idle',session_name:'test',window_index:id,pane_index:0}));
+    const actions=[];
+    let reject=false;
+    await page.route('http://agentmux.test/**',async route=>{
+      const url=new URL(route.request().url());
+      if(url.pathname==='/')return route.fulfill({contentType:'text/html',body:fs.readFileSync(path.join(__dirname,'../web/index.html'),'utf8')});
+      if(url.pathname==='/mirror.js')return route.fulfill({contentType:'text/javascript',body:fs.readFileSync(path.join(__dirname,'../web/mirror.js'),'utf8')});
+      if(url.pathname==='/api/agents')return route.fulfill({json:{panes,controls:{'%1':{binding:'one',available:true,mode:'terminal'},'%2':{binding:'two',available:true,mode:'acp'}}}});
+      if(url.pathname.startsWith('/api/view/'))return route.fulfill({json:{ansi:'\x1b[32mHello\x1b[0m\n'+url.pathname,width:80,height:2}});
+      if(url.pathname==='/api/action'){actions.push(route.request().postDataJSON());return route.fulfill({status:reject?409:200,json:{accepted:!reject}});}
+      return route.abort();
+    });
+    await page.goto('http://agentmux.test/#token='+'a'.repeat(32));
+    await page.waitForFunction(()=>!document.getElementById('prompt').disabled);
+    assert.equal(await page.locator('#agent-drawer').isVisible(),false);
+    await page.locator('#toggle-agents').click();
+    await page.waitForFunction(()=>document.getElementById('agent-drawer').getBoundingClientRect().left===0);
+    assert.equal(await page.locator('#agent-drawer').evaluate(el=>Math.round(el.getBoundingClientRect().width)),320);
+    await page.keyboard.press('Escape');
+    await page.waitForFunction(()=>!document.getElementById('agent-drawer').open);
+    await page.locator('#prompt').fill('first draft');
+    await page.locator('#toggle-agents').click();
+    await page.locator('#agents button').nth(1).click();
+    await page.waitForFunction(()=>!document.getElementById('agent-drawer').open);
+    await page.waitForFunction(()=>document.getElementById('control-hint').textContent==='ACP会話を操作');
+    await page.locator('#prompt').fill('second draft');
+    await page.locator('#toggle-agents').click();
+    await page.locator('#agents button').nth(0).click();
+    await page.waitForFunction(()=>!document.getElementById('agent-drawer').open);
+    await page.waitForFunction(()=>document.getElementById('prompt').value==='first draft');
+    await page.locator('#send').click();
+    await page.waitForFunction(()=>document.getElementById('action-status').textContent==='命令を送信しました');
+    assert.deepEqual(actions[0],{pane:'%1',binding:'one',action:'send',text:'first draft'});
+    assert.equal(await page.locator('#prompt').inputValue(),'');
+    await page.locator('#interrupt').click();
+    await page.waitForFunction(()=>document.getElementById('action-status').textContent==='中断を要求しました');
+    assert.equal(actions[1].action,'interrupt');
+    await page.locator('#toggle-agents').click();
+    await page.locator('#agents button').nth(1).click();
+    await page.waitForFunction(()=>!document.getElementById('agent-drawer').open);
+    await page.waitForFunction(()=>document.getElementById('prompt').value==='second draft');
+    reject=true;await page.locator('#send').click();
+    await page.waitForFunction(()=>document.getElementById('action-status').textContent.includes('操作を確認できません'));
+    assert.equal(await page.locator('#prompt').inputValue(),'second draft');
+    await page.waitForFunction(()=>!document.getElementById('prompt').disabled);
+    await page.setViewportSize({width:390,height:844});
+    await page.locator('#toggle-agents').click();
+    await page.waitForFunction(()=>document.getElementById('agent-drawer').getBoundingClientRect().left===0);
+    assert.equal(await page.locator('#agents').evaluate(el=>getComputedStyle(el).flexDirection),'column');
+    assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth<=window.innerWidth),true);
+    await page.screenshot({path:'/tmp/agentmux-drawer-open.png',fullPage:true});
+    await page.mouse.click(370,400);
+    await page.waitForFunction(()=>!document.getElementById('agent-drawer').open);
+    await page.screenshot({path:'/tmp/agentmux-mirror-mobile.png',fullPage:true});
+    await page.locator('#disconnect').click();
+    assert.equal(await page.locator('#prompt').isDisabled(),true);
+    assert.equal(await page.locator('#prompt').inputValue(),'');
+    assert.deepEqual(errors,[]);
+    console.log('Mirror UI: side drawer, backdrop/Escape dismissal, per-agent drafts, send/interrupt targeting, error recovery, narrow layout passed');
+  } finally {await browser.close();}
+})().catch(error=>{console.error(error);process.exitCode=1;});

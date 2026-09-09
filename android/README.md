@@ -41,7 +41,12 @@ Gradle wrapperを同梱しています。AGP 9.2.1 / Gradle 9.6.1で固定して
 - 約1秒ごとの画面スナップショット取得。切断時は表示をクリアして再試行します。
 - ANSIの基本色・256色・RGB色、太字、斜体、下線と改行を表示します。端末の完全なエミュレーションや画像、カーソルの描画には対応しません。
 - ACP transcriptを取得できない場合、通常のNeovim bufferへフォールバックしません。
-- 閲覧専用です。Androidからの入力送信やPCのフォーカス変更は提供しません。
+- 画面左端の「›」でagent一覧をサイドから開きます。agent選択・外側のタップ・「‹」で閉じ、画面を広く使えます。
+- 「命令を送る」で選択agentへ送信します。入力下書きはagentごとにメモリ内で保持します。Ctrl+Enterでも送信できます。
+- 「実行を中断」は端末agentへCtrl+C、LazyAgent ACPへ会話キャンセルを送ります。paneの削除やプロセス強制終了は行いません。
+- 「最新へ」で出力の自動追従へ戻ります。上へスクロールしている間は追従を止めます。
+- ACP操作はNeovimが公開したRPC接続を使用し、owner PIDと会話ログを照合します。更新後に操作が無効のままなら、LazyAgentの状態更新を待つかNeovimで `:lua require("lazyagent.integrations.agentmux").sync()` を実行してください。
+- 操作の応答がない場合は自動再送しません。送信済みの可能性があるため、画面を確認してから再操作してください。
 - 接続先のみ保存します。トークンは永続保存せず、アプリ再作成時に再入力します。
 - WebViewは接続先のoriginに限定し、ファイルアクセスとJavaScriptネイティブbridgeを使いません。画面本文はHTMLとして解釈せず、テキストとして表示します。
 
@@ -49,7 +54,9 @@ QR生成には[qrcode](https://docs.rs/qrcode/0.14.1/qrcode/)、カメラ読み�
 
 ## 配信インターフェース
 
-`GET /api/agents` はagentに絞った `Snapshot`、`GET /api/view/%123` は `PaneView` のJSONを返します。両者とも `Authorization: Bearer <token>` が必須です。画面URLにはliteralなtmux pane IDのみ指定できます。通常paneの画面取得と更新系HTTP操作は拒否します。CORSは許可しません。
+`GET /api/agents` はagentに絞った `Snapshot`、`GET /api/view/%123` は `PaneView` のJSONを返します。両者とも `Authorization: Bearer <token>` が必須です。画面URLにはliteralなtmux pane IDのみ指定できます。通常paneの画面取得・操作は拒否します。CORSは許可しません。
+
+`POST /api/action` は `application/json` で `{ "pane": "%123", "binding": "…", "action": "send", "text": "命令" }` を受け付けます。`action` は `send` または `interrupt` のみです。`binding` は `/api/agents` の `controls[pane]` から取得し、対象の入れ替わりを検出します。Bearer認証は閲覧と操作の両方を許可します。JSON bodyは16KiB、命令本文はUTF-8で12,000 bytesまで。制御文字（改行・タブ以外）は拒否します。
 
 配信サーバーは4 worker、待ち行列16接続、ヘッダー8KiB、読み書きタイムアウト2秒に制限します。LAN内の少人数向けで、インターネット公開向けのサーバーではありません。
 
@@ -64,3 +71,5 @@ node --check web/mirror.js
 cd android
 ./gradlew assembleDebug testDebugUnitTest lintDebug
 ```
+
+ブラウザUIの回帰テストは `tests/mirror_ui.cjs` にあります。PlaywrightとChromiumを `/tmp` に用意し、`NODE_PATH` と `CHROMIUM_PATH` を指定して実行できます。
