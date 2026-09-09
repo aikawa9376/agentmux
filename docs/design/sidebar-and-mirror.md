@@ -19,3 +19,11 @@ LazyAgent's integration selects an ACP session by status priority and publishes 
 Tokens remain in memory; only the Android connection address persists. HTTP LAN traffic is unencrypted. No remote input endpoint exists. `tests/remote_smoke.py` verifies authorization, empty-agent filtering, rejection of ordinary pane capture, ACP content, and unavailable transcripts on isolated servers.
 
 APK compilation and Android Lint do not verify physical-device LAN behavior. Android real-device validation remains necessary.
+
+## QR pairing
+
+`src/remote.rs::pairing_addresses` uses actual listener ports and one representative interface address of the bind's IP family; wildcard and loopback addresses are never encoded for phone pairing. Physical LAN interfaces are preferred over virtual interfaces, then the default-route interface and deterministic name/address ordering. `--advertise-address` selects one IP explicitly. Generated tokens use 128 random bits as 32 hex characters, shrinking the QR while preserving medium error correction and the quiet zone. `show_pairing` emits high-contrast terminal QR codes, and optionally creates a new mode-0600 SVG. QR payloads are ordinary HTTP URLs with `#token=...`, matching the existing browser fragment handling; pairing credentials are not served through a public endpoint.
+
+Android `Pairing` validates both manually entered connections and scanned URLs. `ScanContract` provides camera scanning with runtime permission handling; `GetContent` grants access only to the selected image. `QrImage` samples gallery images to at most 2048 pixels per dimension and decodes on a single background worker, accepting exactly one distinct valid pairing payload. No Google Play Services, online QR service, or image upload is involved. Activity teardown discards pending image results. JVM tests cover URL validation and QR pixel decoding; camera optics and gallery provider behavior require device validation.
+
+Development uses the SDK under `/tmp/agentmux-sdk`; the user permits this host-build workflow. Gradle dependencies use the existing user cache.

@@ -63,7 +63,7 @@ agent-only表示はagentが0件でも通常paneへ切り替わりません。`a`
 
 ## Android / LAN mirror
 
-同梱の[Androidアプリ](android/README.md)からagent一覧と画面を閲覧できます。PC側で `agentmux serve --bind 0.0.0.0:9876` を起動し、AndroidにPCのLAN IPと表示されたトークンを入力します。閲覧専用で、ブラウザからも利用できます。
+同梱の[Androidアプリ](android/README.md)からagent一覧と画面を閲覧できます。PC側で `agentmux serve --bind 0.0.0.0:9876` を起動し、Androidで表示されたQRをカメラまたは保存画像から読み取ると接続できます（IPとトークンの手入力も可能）。閲覧専用で、ブラウザからも利用できます。
 
 ## CLI compatibility
 

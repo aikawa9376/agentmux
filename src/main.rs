@@ -35,6 +35,12 @@ enum Commands {
         bind: std::net::SocketAddr,
         #[arg(long)]
         token_file: Option<std::path::PathBuf>,
+        /// LAN IP to encode in the pairing QR (auto-detected for wildcard binds).
+        #[arg(long)]
+        advertise_address: Option<std::net::IpAddr>,
+        /// Save a pairing QR as a new private SVG file.
+        #[arg(long)]
+        qr_svg: Option<std::path::PathBuf>,
     },
     /// Open the interactive sidebar.
     #[command(alias = "menu")]
@@ -147,8 +153,19 @@ fn main() -> Result<()> {
         origin: None,
         client: None,
     }) {
-        Commands::Serve { bind, token_file } => {
-            agentmux::remote::serve(tmux, bind, token_file.as_deref())?;
+        Commands::Serve {
+            bind,
+            token_file,
+            advertise_address,
+            qr_svg,
+        } => {
+            agentmux::remote::serve(
+                tmux,
+                bind,
+                token_file.as_deref(),
+                advertise_address,
+                qr_svg.as_deref(),
+            )?;
         }
         Commands::Ui { origin, client } => {
             tui::run(tmux, origin, client, LoadedConfig::load())?;

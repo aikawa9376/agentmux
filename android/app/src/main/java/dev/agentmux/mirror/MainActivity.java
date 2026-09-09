@@ -1,6 +1,12 @@
 package dev.agentmux.mirror;
 
-import android.app.Activity;
+import androidx.activity.ComponentActivity;
+import androidx.activity.result.ActivityResultLauncher;
+import androidx.activity.result.contract.ActivityResultContracts;
+import com.journeyapps.barcodescanner.ScanContract;
+import com.journeyapps.barcodescanner.ScanOptions;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 import android.os.Bundle;
 import android.net.Uri;
 import android.text.InputType;
@@ -16,13 +22,23 @@ import java.io.ByteArrayInputStream;
 import java.net.URI;
 
 /** Native connection screen with a same-origin, read-only mirror WebView. */
-public final class MainActivity extends Activity {
+public final class MainActivity extends ComponentActivity {
     private WebView web;
     private LinearLayout root;
     private EditText address;
     private EditText token;
     private TextView status;
     private String origin;
+    private boolean readingImage;
+    private final ExecutorService imageWorker = Executors.newSingleThreadExecutor();
+    private final ActivityResultLauncher<ScanOptions> camera = registerForActivityResult(
+        new ScanContract(), result -> {
+            if (result.getContents() != null) acceptPairing(result.getContents());
+        });
+    private final ActivityResultLauncher<String> gallery = registerForActivityResult(
+        new ActivityResultContracts.GetContent(), uri -> {
+            if (uri != null) readImage(uri);
+        });
 
     @Override public void onCreate(Bundle state) {
         super.onCreate(state);
@@ -48,6 +64,13 @@ public final class MainActivity extends Activity {
         token = new EditText(this); token.setSingleLine(true); token.setHint(R.string.text_3);
         token.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_PASSWORD);
         token.setSaveEnabled(false); root.addView(token);
+        Button scan = new Button(this); scan.setText(R.string.scan_camera); root.addView(scan);
+        scan.setOnClickListener(v -> {
+            if (!readingImage) camera.launch(new ScanOptions().setDesiredBarcodeFormats(ScanOptions.QR_CODE)
+                .setPrompt(getString(R.string.scan_prompt)).setBeepEnabled(false).setOrientationLocked(false));
+        });
+        Button image = new Button(this); image.setText(R.string.scan_image); root.addView(image);
+        image.setOnClickListener(v -> { if (!readingImage) gallery.launch("image/*"); });
         Button connect = new Button(this); connect.setText(R.string.text_4); root.addView(connect);
         status = new TextView(this); status.setText(R.string.text_5); root.addView(status);
         connect.setOnClickListener(v -> connect()); setContentView(root);
@@ -57,16 +80,10 @@ public final class MainActivity extends Activity {
     private void connect() {
         String value = address.getText().toString().trim();
         String secret = token.getText().toString().trim();
+        if (readingImage) return;
         try {
-            URI uri = new URI(value);
-            if (!("http".equals(uri.getScheme()) || "https".equals(uri.getScheme())) || uri.getHost() == null
-                || uri.getUserInfo() != null || uri.getQuery() != null || uri.getFragment() != null
-                || !(uri.getPath().isEmpty() || uri.getPath().equals("/")) || uri.getPort() > 65535) {
-                throw new IllegalArgumentException();
-            }
-            if (!secret.matches("[A-Za-z0-9_-]{32,}")) { status.setText(R.string.text_6); return; }
-            origin = uri.getScheme() + "://" + uri.getRawAuthority();
-        } catch (Exception e) { status.setText(R.string.text_7); return; }
+            origin = Pairing.manual(value, secret).origin;
+        } catch (IllegalArgumentException e) { status.setText(R.string.invalid_pairing); return; }
         getPreferences(MODE_PRIVATE).edit().putString("address", origin).apply();
         ((InputMethodManager)getSystemService(Context.INPUT_METHOD_SERVICE)).hideSoftInputFromWindow(token.getWindowToken(), 0);
         token.setText(R.string.text_8); root.removeAllViews();
@@ -93,7 +110,36 @@ public final class MainActivity extends Activity {
         root.addView(web, new LinearLayout.LayoutParams(-1, 0, 1));
         web.loadUrl(origin + "/#token=" + secret);
     }
+    private void acceptPairing(String contents) {
+        try {
+            Pairing pairing = Pairing.parse(contents);
+            address.setText(pairing.origin);
+            token.setText(pairing.token);
+            connect();
+        } catch (IllegalArgumentException e) { status.setText(R.string.invalid_qr); }
+    }
+
+    private void readImage(Uri uri) {
+        if (readingImage) return;
+        readingImage = true;
+        status.setText(R.string.reading_qr);
+        imageWorker.execute(() -> {
+            try {
+                String contents = QrImage.read(getContentResolver(), uri);
+                runOnUiThread(() -> {
+                    readingImage = false;
+                    if (!isDestroyed() && !isFinishing()) acceptPairing(contents);
+                });
+            } catch (Exception e) {
+                runOnUiThread(() -> {
+                    readingImage = false;
+                    if (!isDestroyed() && !isFinishing()) status.setText(R.string.image_qr_failed);
+                });
+            }
+        });
+    }
+
     @Override protected void onPause() { if(web != null) web.onPause(); super.onPause(); }
     @Override protected void onResume() { super.onResume(); if(web != null) web.onResume(); }
-    @Override protected void onDestroy() { if(web != null) { web.destroy(); web = null; } super.onDestroy(); }
+    @Override protected void onDestroy() { if(web != null) { web.destroy(); web = null; } imageWorker.shutdownNow(); super.onDestroy(); }
 }

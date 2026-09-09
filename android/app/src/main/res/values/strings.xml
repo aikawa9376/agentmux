@@ -9,4 +9,11 @@
     <string name="text_8"></string>
     <string name="text_9">接続先を変更 / 再接続</string>
     <string name="text_10">接続できません。PCの配信・IP・LANを確認し、再接続してください。</string>
+    <string name="scan_camera">カメラでQRを読み取る</string>
+    <string name="scan_image">画像からQRを読み取る</string>
+    <string name="scan_prompt">PCのagentmuxに表示されたQRを読み取ってください</string>
+    <string name="invalid_pairing">接続先URLとトークンを確認してください。</string>
+    <string name="invalid_qr">Agentmuxの接続用QRではありません。</string>
+    <string name="reading_qr">画像のQRを読み取っています…</string>
+    <string name="image_qr_failed">QRを読み取れません。接続用QRが1つだけ写った鮮明な画像を選んでください。</string>
 </resources>

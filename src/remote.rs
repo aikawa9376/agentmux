@@ -4,17 +4,23 @@ use anyhow::{Context, Result, bail};
 use std::{
     fs::File,
     io::{BufRead, BufReader, Read, Write},
-    net::{SocketAddr, TcpListener, TcpStream},
+    net::{IpAddr, SocketAddr, TcpListener, TcpStream},
     path::Path,
     sync::{Arc, Mutex, mpsc},
     time::Duration,
 };
 
-pub fn serve(tmux: Tmux, bind: SocketAddr, token_file: Option<&Path>) -> Result<()> {
+pub fn serve(
+    tmux: Tmux,
+    bind: SocketAddr,
+    token_file: Option<&Path>,
+    advertise_address: Option<IpAddr>,
+    qr_svg: Option<&Path>,
+) -> Result<()> {
     let token = match token_file {
         Some(path) => std::fs::read_to_string(path)?.trim().to_owned(),
         None => {
-            let mut bytes = [0u8; 32];
+            let mut bytes = [0u8; 16];
             File::open("/dev/urandom")?.read_exact(&mut bytes)?;
             bytes.iter().map(|byte| format!("{byte:02x}")).collect()
         }
@@ -32,6 +38,7 @@ pub fn serve(tmux: Tmux, bind: SocketAddr, token_file: Option<&Path>) -> Result<
         listener.local_addr()?
     );
     eprintln!("Pairing token: {token}");
+    show_pairing(listener.local_addr()?, advertise_address, &token, qr_svg)?;
     let token = Arc::new(token);
     let (tx, rx) = mpsc::sync_channel::<TcpStream>(16);
     let rx = Arc::new(Mutex::new(rx));
@@ -49,6 +56,145 @@ pub fn serve(tmux: Tmux, bind: SocketAddr, token_file: Option<&Path>) -> Result<
         let stream = stream?;
         // Bound queued connections as well as worker count.
         let _ = tx.try_send(stream);
+    }
+    Ok(())
+}
+
+fn pairing_url(address: SocketAddr, token: &str) -> String {
+    format!("http://{address}/#token={token}")
+}
+
+fn pairing_addresses(bind: SocketAddr, advertised: Option<IpAddr>) -> Result<Vec<SocketAddr>> {
+    let ips = if let Some(ip) = advertised {
+        if ip.is_unspecified() || ip.is_loopback() || ip.is_multicast() {
+            bail!("--advertise-address must be a reachable LAN IP");
+        }
+        if !bind.ip().is_unspecified() && bind.ip() != ip {
+            bail!("--advertise-address must match a concrete --bind IP");
+        }
+        if bind.is_ipv4() != ip.is_ipv4() {
+            bail!("--advertise-address and --bind must use the same IP family");
+        }
+        vec![ip]
+    } else if bind.ip().is_unspecified() {
+        let mut interfaces: Vec<_> = if_addrs::get_if_addrs()?
+            .into_iter()
+            .filter(|interface| { let ip = interface.ip(); !ip.is_loopback() && !ip.is_unspecified() && !ip.is_multicast() })
+            .filter(|interface| interface.ip().is_ipv4() == bind.is_ipv4())
+            // Link-local IPv6 requires a phone-specific interface scope, so cannot pair by QR.
+            .filter(|interface| !matches!(interface.ip(), IpAddr::V6(v6) if v6.segments()[0] & 0xffc0 == 0xfe80))
+            .collect();
+        let preferred = default_route_interface();
+        interfaces.sort_by_key(|interface| {
+            (
+                interface_rank(&interface.name, preferred.as_deref()),
+                interface.ip(),
+            )
+        });
+        interfaces
+            .first()
+            .map(|interface| vec![interface.ip()])
+            .unwrap_or_default()
+    } else if bind.ip().is_loopback() {
+        vec![]
+    } else {
+        vec![bind.ip()]
+    };
+    Ok(ips
+        .into_iter()
+        .map(|ip| SocketAddr::new(ip, bind.port()))
+        .collect())
+}
+
+fn default_route_interface() -> Option<String> {
+    // Linux route table, no external network request or dependency on `ip`.
+    let routes = std::fs::read_to_string("/proc/net/route").ok()?;
+    routes
+        .lines()
+        .skip(1)
+        .filter_map(|line| {
+            let fields: Vec<_> = line.split_whitespace().collect();
+            if fields.len() < 8 || fields[1] != "00000000" || fields[7] != "00000000" {
+                return None;
+            }
+            let flags = u32::from_str_radix(fields[3], 16).ok()?;
+            if flags & 1 == 0 {
+                return None;
+            }
+            Some((fields[6].parse::<u32>().ok()?, fields[0].to_owned()))
+        })
+        .min()
+        .map(|(_, name)| name)
+}
+
+fn interface_rank(name: &str, preferred: Option<&str>) -> u8 {
+    let virtual_interface = [
+        "docker",
+        "veth",
+        "br-",
+        "virbr",
+        "tun",
+        "tap",
+        "wg",
+        "tailscale",
+        "zt",
+    ]
+    .iter()
+    .any(|prefix| name.starts_with(prefix));
+    if virtual_interface {
+        3
+    } else if preferred == Some(name) {
+        0
+    } else if name.starts_with("en") || name.starts_with("eth") || name.starts_with("wl") {
+        1
+    } else {
+        2
+    }
+}
+
+fn show_pairing(
+    bind: SocketAddr,
+    advertised: Option<IpAddr>,
+    token: &str,
+    svg_path: Option<&Path>,
+) -> Result<()> {
+    use qrcode::{
+        QrCode,
+        render::{svg, unicode},
+    };
+    let addresses = pairing_addresses(bind, advertised)?;
+    if svg_path.is_some() && addresses.len() != 1 {
+        bail!(
+            "SVG export needs one LAN address; specify --bind 0.0.0.0:9876 --advertise-address <LAN IP>"
+        );
+    }
+    if addresses.is_empty() {
+        eprintln!("LAN pairing QR unavailable. Use --bind 0.0.0.0:9876 to listen on the LAN.");
+    }
+    for address in addresses {
+        let url = pairing_url(address, token);
+        let code = QrCode::new(url.as_bytes()).context("pairing URL is too long for a QR code")?;
+        let qr = code.render::<unicode::Dense1x2>().build();
+        eprintln!("\nScan in Agentmux Mirror: http://{address}");
+        // Force contrast independent of the user's terminal color scheme.
+        for line in qr.lines() {
+            eprintln!("\x1b[30;47m{line}\x1b[0m");
+        }
+        if let Some(path) = svg_path {
+            use std::os::unix::fs::OpenOptionsExt;
+            let svg = code.render::<svg::Color>().min_dimensions(512, 512).build();
+            let mut file = std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode(0o600)
+                .open(path)
+                .context("could not create private QR SVG (file must not already exist)")?;
+            file.write_all(svg.as_bytes())?;
+            eprintln!(
+                "Pairing QR saved to {} (contains your access token)",
+                path.display()
+            );
+        }
     }
     Ok(())
 }
@@ -194,6 +340,56 @@ mod tests {
         );
         assert_eq!(route("GET / HTTP/1.1\r\n\r\n", &tmux, "secret").0, 200);
     }
+    #[test]
+    fn prefer_default_physical_lan_and_compact_qr() {
+        assert!(interface_rank("wlan0", Some("wlan0")) < interface_rank("eth0", Some("wlan0")));
+        assert!(interface_rank("wlan0", Some("tun0")) < interface_rank("tun0", Some("tun0")));
+        assert!(interface_rank("enp5s0", None) < interface_rank("docker0", None));
+        let address = "192.168.1.20:9876".parse().unwrap();
+        let old = qrcode::QrCode::new(pairing_url(address, &"a".repeat(64))).unwrap();
+        let compact = qrcode::QrCode::new(pairing_url(address, &"a".repeat(32))).unwrap();
+        assert!(compact.width() < old.width());
+    }
+
+    #[test]
+    fn pairing_uses_actual_port_and_fragment_token() {
+        assert_eq!(
+            pairing_url("192.168.1.20:1234".parse().unwrap(), "abc"),
+            "http://192.168.1.20:1234/#token=abc"
+        );
+        assert_eq!(
+            pairing_url("[fd00::1]:9876".parse().unwrap(), "abc"),
+            "http://[fd00::1]:9876/#token=abc"
+        );
+        assert!(
+            pairing_addresses("127.0.0.1:9876".parse().unwrap(), None)
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            pairing_addresses(
+                "0.0.0.0:9876".parse().unwrap(),
+                Some("0.0.0.0".parse().unwrap())
+            )
+            .is_err()
+        );
+        assert!(
+            pairing_addresses(
+                "127.0.0.1:9876".parse().unwrap(),
+                Some("192.168.1.20".parse().unwrap())
+            )
+            .is_err()
+        );
+        assert_eq!(
+            pairing_addresses(
+                "0.0.0.0:1234".parse().unwrap(),
+                Some("192.168.1.20".parse().unwrap())
+            )
+            .unwrap(),
+            vec!["192.168.1.20:1234".parse::<SocketAddr>().unwrap()]
+        );
+    }
+
     #[test]
     fn targets_are_literal_pane_ids() {
         assert!(valid_pane_id("%12"));
