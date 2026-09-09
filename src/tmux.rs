@@ -320,6 +320,34 @@ impl Tmux {
         Ok(())
     }
 
+    pub fn control_metadata(&self, pane: &str) -> Result<String> {
+        self.run(["display-message", "-p", "-t", pane,
+            "#{pane_pid}\x1f#{@agent_status_owner}\x1f#{@agent_status_pid}\x1f#{@agent_preview_path}\x1f#{@agent_control_socket}"])
+    }
+
+    pub fn interrupt(&self, pane: &str) -> Result<()> {
+        self.run(["send-keys", "-t", pane, "C-c"])?;
+        Ok(())
+    }
+
+    pub fn paste_prompt(&self, pane: &str, text: &str) -> Result<()> {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static NEXT_BUFFER: AtomicU64 = AtomicU64::new(0);
+        let name = format!(
+            "agentmux-{}-{}",
+            std::process::id(),
+            NEXT_BUFFER.fetch_add(1, Ordering::Relaxed)
+        );
+        self.run(["set-buffer", "-b", &name, "--", text])?;
+        let result = self.run(["paste-buffer", "-d", "-p", "-b", &name, "-t", pane]);
+        if result.is_err() {
+            let _ = self.run(["delete-buffer", "-b", &name]);
+        }
+        result?;
+        self.run(["send-keys", "-t", pane, "Enter"])?;
+        Ok(())
+    }
+
     pub fn respawn(&self, pane: &str) -> Result<()> {
         let command = self.show_option(pane, "@agent_command").unwrap_or_default();
         let cwd = self.run(["display-message", "-p", "-t", pane, "#{pane_current_path}"])?;
@@ -423,7 +451,15 @@ impl Tmux {
             .as_secs()
             .to_string();
         let owner_pid = agent.owner_pid.to_string();
+        // Neovim jobstart supplies its own RPC address in NVIM. Never discover
+        // unrelated editor sockets; the RPC also checks the publisher PID.
+        let socket = if agent.owner == "lazyagent" {
+            std::env::var("NVIM").unwrap_or_default()
+        } else {
+            String::new()
+        };
         let values = [
+            ("@agent_control_socket", socket.as_str()),
             ("@agent_kind", agent.kind),
             ("@agent_name", agent.name),
             ("@agent_status", normalized.label()),
@@ -467,6 +503,7 @@ impl Tmux {
             "@agent_status_pid",
             "@agent_status_owner",
             "@agent_preview_path",
+            "@agent_control_socket",
         ] {
             self.unset_option(pane, option)?;
         }

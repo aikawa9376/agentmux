@@ -1,4 +1,4 @@
-//! Read-only LAN mirror. The token authorizes access to agent screens only.
+//! Token-authenticated LAN mirror with explicit send and interrupt actions.
 use crate::{model::Snapshot, tmux::Tmux};
 use anyhow::{Context, Result, bail};
 use std::{
@@ -202,22 +202,57 @@ fn show_pairing(
 fn handle(stream: &mut TcpStream, tmux: &Tmux, token: &str) -> Result<()> {
     stream.set_read_timeout(Some(Duration::from_secs(2)))?;
     stream.set_write_timeout(Some(Duration::from_secs(2)))?;
-    let mut reader = BufReader::new((&mut *stream).take(8193));
+    let mut reader = BufReader::new(&mut *stream);
     let mut header = String::new();
     loop {
         let start = header.len();
-        if reader.read_line(&mut header)? == 0 || header.len() > 8192 {
+        if (&mut reader)
+            .take((8193 - start) as u64)
+            .read_line(&mut header)?
+            == 0
+            || header.len() > 8192
+        {
             return respond(stream, 400, "text/plain", b"Invalid request");
         }
         if &header[start..] == "\r\n" {
             break;
         }
     }
-    let (status, mime, body) = route(&header, tmux, token);
+    let length = match body_length(&header) {
+        Ok(length) => length,
+        Err(_) => return respond(stream, 400, "text/plain", b"Invalid Content-Length"),
+    };
+    if length > 16384 {
+        return respond(stream, 413, "text/plain", b"Request too large");
+    }
+    let mut body = vec![0; length];
+    reader.read_exact(&mut body)?;
+    let (status, mime, body) = route_body(&header, &body, tmux, token);
     respond(stream, status, mime, &body)
 }
 
+fn body_length(header: &str) -> Result<usize> {
+    let mut length = None;
+    for (name, value) in header.lines().filter_map(|line| line.split_once(':')) {
+        if name.eq_ignore_ascii_case("transfer-encoding") {
+            bail!("chunked requests unsupported");
+        }
+        if name.eq_ignore_ascii_case("content-length") {
+            if length.is_some() {
+                bail!("duplicate length");
+            }
+            length = Some(value.trim().parse::<usize>()?);
+        }
+    }
+    Ok(length.unwrap_or(0))
+}
+
+#[cfg(test)]
 fn route(header: &str, tmux: &Tmux, token: &str) -> (u16, &'static str, Vec<u8>) {
+    route_body(header, &[], tmux, token)
+}
+
+fn route_body(header: &str, body: &[u8], tmux: &Tmux, token: &str) -> (u16, &'static str, Vec<u8>) {
     let mut lines = header.split("\r\n");
     let parts: Vec<_> = lines
         .next()
@@ -231,18 +266,18 @@ fn route(header: &str, tmux: &Tmux, token: &str) -> (u16, &'static str, Vec<u8>)
             text.as_bytes().to_vec(),
         )
     };
-    if parts.len() != 3 || parts[0] != "GET" {
-        return plain(405, "GET only");
+    if parts.len() != 3 || !matches!(parts[0], "GET" | "POST") {
+        return plain(405, "Method not allowed");
     }
-    match parts[1] {
-        "/" => {
+    match (parts[0], parts[1]) {
+        ("GET", "/") => {
             return (
                 200,
                 "text/html; charset=utf-8",
                 include_bytes!("../web/index.html").to_vec(),
             );
         }
-        "/mirror.js" => {
+        ("GET", "/mirror.js") => {
             return (
                 200,
                 "text/javascript; charset=utf-8",
@@ -259,12 +294,52 @@ fn route(header: &str, tmux: &Tmux, token: &str) -> (u16, &'static str, Vec<u8>)
     if !authorized {
         return plain(401, "Pairing token required");
     }
+    if parts[0] == "POST" {
+        if parts[1] != "/api/action" {
+            return plain(405, "Method not allowed");
+        }
+        let json_content =
+            header
+                .lines()
+                .filter_map(|line| line.split_once(':'))
+                .any(|(name, value)| {
+                    name.eq_ignore_ascii_case("content-type")
+                        && value.trim().eq_ignore_ascii_case("application/json")
+                });
+        if !json_content {
+            return plain(415, "JSON required");
+        }
+        let Ok(request) = serde_json::from_slice::<crate::control::Request>(body) else {
+            return plain(400, "Invalid action");
+        };
+        if !valid_pane_id(&request.pane) {
+            return plain(400, "Invalid pane");
+        }
+        return match crate::control::execute(tmux, request) {
+            Ok(()) => (200, "application/json", b"{\"accepted\":true}".to_vec()),
+            Err(_) => plain(
+                409,
+                "Action unavailable or unconfirmed; refresh before retrying",
+            ),
+        };
+    }
     let result: Result<Vec<u8>> = (|| match parts[1] {
         "/api/agents" => {
             let mut snapshot = tmux.snapshot()?;
             snapshot.panes.retain(|pane| pane.is_agent());
             snapshot.spaces = Snapshot::build_spaces(&snapshot.panes);
-            Ok(serde_json::to_vec(&snapshot)?)
+            let controls: std::collections::BTreeMap<_, _> = snapshot
+                .panes
+                .iter()
+                .filter_map(|pane| {
+                    crate::control::capabilities(tmux, pane)
+                        .ok()
+                        .map(|info| (pane.pane_id.clone(), info))
+                })
+                .collect();
+            let mut response = serde_json::to_value(&snapshot)?;
+            response["controls"] = serde_json::to_value(controls)?;
+            Ok(serde_json::to_vec(&response)?)
         }
         path if path.starts_with("/api/view/") => {
             let id = &path[10..];
@@ -305,7 +380,7 @@ fn respond(stream: &mut TcpStream, status: u16, mime: &str, body: &[u8]) -> Resu
 mod tests {
     use super::*;
     #[test]
-    fn api_requires_exact_bearer_and_never_mutates() {
+    fn api_requires_exact_bearer_and_rejects_unknown_actions() {
         let tmux = Tmux::new(Some("unused".into()));
         assert_eq!(
             route("GET /api/agents HTTP/1.1\r\n\r\n", &tmux, "secret").0,
@@ -349,6 +424,31 @@ mod tests {
         let old = qrcode::QrCode::new(pairing_url(address, &"a".repeat(64))).unwrap();
         let compact = qrcode::QrCode::new(pairing_url(address, &"a".repeat(32))).unwrap();
         assert!(compact.width() < old.width());
+    }
+
+    #[test]
+    fn reject_ambiguous_http_framing_and_invalid_actions() {
+        assert!(
+            body_length("POST /api/action HTTP/1.1\r\nContent-Length: 1\r\nContent-Length: 2\r\n")
+                .is_err()
+        );
+        assert!(body_length("Transfer-Encoding: chunked\r\n").is_err());
+        assert!(body_length("Content-Length: -1\r\n").is_err());
+        assert_eq!(body_length("Content-Length: 42\r\n").unwrap(), 42);
+        let tmux = Tmux::new(Some("unused".into()));
+        let header = "POST /api/action HTTP/1.1\r\nAuthorization: Bearer secret\r\nContent-Type: application/json\r\n\r\n";
+        assert_eq!(route_body(header, b"{}", &tmux, "secret").0, 400);
+        assert_eq!(
+            route_body(
+                header,
+                br#"{"pane":"%1","binding":"x","action":"kill"}"#,
+                &tmux,
+                "secret"
+            )
+            .0,
+            400
+        );
+        assert_eq!(route_body(header, b"{}", &tmux, "wrong").0, 401);
     }
 
     #[test]

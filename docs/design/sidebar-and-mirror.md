@@ -16,7 +16,7 @@ LazyAgent's integration selects an ACP session by status priority and publishes 
 
 [Android documentation](../../android/README.md) owns the build steps, connection workflow, endpoints, authentication, rendering limits, and server resource limits. `src/remote.rs` exposes agent-only snapshots and the shared `Tmux::pane_view`. `web/mirror.js` renders terminal content as text with SGR attributes and uses generation checks to discard stale asynchronous results after selection or connection changes.
 
-Tokens remain in memory; only the Android connection address persists. HTTP LAN traffic is unencrypted. No remote input endpoint exists. `tests/remote_smoke.py` verifies authorization, empty-agent filtering, rejection of ordinary pane capture, ACP content, and unavailable transcripts on isolated servers.
+Tokens remain in memory; only the Android connection address persists. HTTP LAN traffic is unencrypted. `POST /api/action` authorizes operator send/interrupt actions with the same bearer token. `tests/remote_smoke.py` verifies authorization, empty-agent filtering, rejection of ordinary pane capture, ACP content, and unavailable transcripts on isolated servers.
 
 APK compilation and Android Lint do not verify physical-device LAN behavior. Android real-device validation remains necessary.
 
@@ -27,3 +27,15 @@ APK compilation and Android Lint do not verify physical-device LAN behavior. And
 Android `Pairing` validates both manually entered connections and scanned URLs. `ScanContract` provides camera scanning with runtime permission handling; `GetContent` grants access only to the selected image. `QrImage` samples gallery images to at most 2048 pixels per dimension and decodes on a single background worker, accepting exactly one distinct valid pairing payload. No Google Play Services, online QR service, or image upload is involved. Activity teardown discards pending image results. JVM tests cover URL validation and QR pixel decoding; camera optics and gallery provider behavior require device validation.
 
 Development uses the SDK under `/tmp/agentmux-sdk`; the user permits this host-build workflow. Gradle dependencies use the existing user cache.
+
+## Operator controls
+
+`src/control.rs` checks current agent identity and a binding derived from pane process, owner PID, transcript, published socket, kind/name, foreground command and process detection before each action. Requests carry the binding selected in the UI. A process-wide mutex serializes terminal pastes and ACP actions. This is a freshness guard, not a transaction over agent lifecycle: an agent can still exit during a tmux operation.
+
+Terminal sends use a private named tmux buffer, bracketed paste when supported, and Enter; interrupt sends Ctrl+C. Plain panes, exited agents, editors without an ACP bridge, and stale bindings are unavailable. Known shells are unavailable unless process-based agent detection still finds an agent.
+
+`Tmux::publish_agent` captures only the publishing Neovim job's `NVIM` environment as `@agent_control_socket`; arbitrary editor socket discovery is not used. The embedded `src/control_acp.lua` verifies the actual editor PID and finds exactly one ACP session matching the published transcript. It calls LazyAgent's `paste_and_submit` or `send_keys(..., 'C-c')`, without focusing or typing in editor buffers. Publishing state again enables the bridge for existing sessions. Neovim RPC timeout reports uncertain delivery and never retries automatically.
+
+HTTP accepts bounded Content-Length JSON bodies, rejects duplicate lengths and transfer encoding, requires bearer authentication for both reads and writes, and exposes only send/interrupt actions. Unknown actions and stale targets are rejected.
+
+`tests/remote_smoke.py` exercises real tmux input and an isolated Neovim RPC stub.

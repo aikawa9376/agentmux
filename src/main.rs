@@ -29,7 +29,7 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Commands {
-    /// Serve a token-protected, read-only LAN mirror.
+    /// Serve a token-protected LAN mirror with send and interrupt controls.
     Serve {
         #[arg(long, default_value = "127.0.0.1:9876")]
         bind: std::net::SocketAddr,

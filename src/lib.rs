@@ -1,4 +1,5 @@
 pub mod config;
+pub mod control;
 pub mod detect;
 pub mod model;
 pub mod remote;
