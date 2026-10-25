@@ -76,6 +76,32 @@ fn control_mode_watcher_receives_pane_output() {
     assert!(observed, "control-mode watcher did not receive pane output");
 }
 
+#[test]
+fn background_agents_do_not_replace_the_foreground_shell() {
+    let Some(server) = TestServer::start_with("bash --noprofile --norc") else {
+        eprintln!("tmux unavailable; skipping integration smoke test");
+        return;
+    };
+    let tmux = Tmux::new(Some(server.socket.clone()));
+    let pane = tmux.snapshot().unwrap().panes[0].pane_id.clone();
+    tmux.send_text(&pane, "(exec -a codex sleep 30) &", true)
+        .unwrap();
+    thread::sleep(Duration::from_millis(150));
+    assert!(
+        !tmux.snapshot().unwrap().panes[0].is_agent(),
+        "a background job must not classify its foreground shell"
+    );
+    tmux.send_text(&pane, "fg", true).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while Instant::now() < deadline {
+        if tmux.snapshot().unwrap().panes[0].agent_kind.as_deref() == Some("codex") {
+            return;
+        }
+        thread::sleep(Duration::from_millis(25));
+    }
+    panic!("foreground job was not detected");
+}
+
 impl Drop for TestServer {
     fn drop(&mut self) {
         let _ = Command::new("tmux")
@@ -160,11 +186,32 @@ fn editor_publish_and_owner_safe_withdraw_flow_into_snapshot() {
             .contains("preview marker")
     );
 
+    // Live previews stay bounded; scrolling can reach the start of a long ACP log.
+    fs::write(
+        &preview_path,
+        format!(
+            "ACP history start\n{}ACP history end\n",
+            "a long transcript line\n".repeat(15_000)
+        ),
+    )
+    .unwrap();
+    assert!(
+        !tmux
+            .pane_view(&pane_id)
+            .unwrap()
+            .ansi
+            .contains("ACP history start")
+    );
+    let history = tmux.pane_history(&pane_id).unwrap();
+    assert!(history.contains("ACP history start"));
+    assert!(history.contains("ACP history end"));
+
     fs::remove_file(&preview_path).unwrap();
     assert!(
         tmux.pane_view(&pane_id).is_err(),
         "missing transcript must not expose editor screen"
     );
+    assert!(tmux.pane_history(&pane_id).is_err());
 
     assert!(!tmux.withdraw_agent(&pane_id, "someone-else").unwrap());
     assert!(tmux.snapshot().unwrap().pane(&pane_id).unwrap().is_agent());
@@ -187,6 +234,7 @@ fn editor_publish_and_owner_safe_withdraw_flow_into_snapshot() {
     .unwrap();
     assert!(!tmux.snapshot().unwrap().pane(&pane_id).unwrap().is_agent());
     assert!(tmux.pane_view(&pane_id).is_err());
+    assert!(tmux.pane_history(&pane_id).is_err());
     tmux.publish_agent(
         &pane_id,
         PublishedAgent {
@@ -331,6 +379,11 @@ fn tmux_config_replaces_stale_popup_bindings_with_panes() {
     assert!(
         agentmux_keys
             .iter()
+            .any(|line| line.contains(" A ") && line.contains("--popup"))
+    );
+    assert!(
+        agentmux_keys
+            .iter()
             .all(|line| !line.contains("display-popup"))
     );
     assert!(
@@ -358,6 +411,13 @@ fn pane_view_captures_only_the_visible_cell_grid() {
     assert!(!view.ansi.contains("pane %"));
     assert!(view.cursor_x < view.width);
     assert!(view.cursor_y < view.height);
+
+    let history = tmux.pane_history(&pane).unwrap();
+    assert!(history.lines().count() > usize::from(view.height));
+    assert_eq!(history.lines().next(), Some("1"));
+    assert!(history.lines().any(|line| line == "80"));
+    // Reading history must leave the actual pane viewport untouched.
+    assert_eq!(tmux.pane_view(&pane).unwrap().ansi, view.ansi);
 }
 
 #[test]

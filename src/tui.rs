@@ -48,6 +48,47 @@ const TEAL: Color = Color::Rgb(148, 226, 213);
 enum FocusPanel {
     Spaces,
     Agents,
+    Preview,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum PreviewMotion {
+    Lines(isize),
+    Pages(isize),
+    HalfPages(isize),
+    Top,
+    Bottom,
+}
+
+#[derive(Debug, Default)]
+struct PreviewScroll {
+    // None follows live output. Some(top) reads a frozen history snapshot.
+    top: Option<usize>,
+}
+
+impl PreviewScroll {
+    fn offset(&self, height: usize, viewport: u16) -> usize {
+        let bottom = height.saturating_sub(usize::from(viewport));
+        self.top.unwrap_or(bottom).min(bottom)
+    }
+
+    fn move_by(&mut self, motion: PreviewMotion, height: usize, viewport: u16) {
+        let bottom = height.saturating_sub(usize::from(viewport));
+        let current = self.offset(height, viewport);
+        let next = match motion {
+            PreviewMotion::Lines(delta) => current.saturating_add_signed(delta),
+            PreviewMotion::Pages(delta) => current.saturating_add_signed(
+                delta.saturating_mul(viewport.saturating_sub(1).max(1) as isize),
+            ),
+            PreviewMotion::HalfPages(delta) => {
+                current.saturating_add_signed(delta.saturating_mul((viewport / 2).max(1) as isize))
+            }
+            PreviewMotion::Top => 0,
+            PreviewMotion::Bottom => bottom,
+        }
+        .min(bottom);
+        self.top = (next < bottom).then_some(next);
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -69,12 +110,14 @@ struct PromptState {
 enum ConfirmAction {
     Kill(String),
     Respawn(String),
+    Unmark(String),
 }
 
 #[derive(Debug)]
 enum UiCommand {
     Quit,
     Refresh,
+    ScrollPreview(PreviewMotion),
     Focus(String),
     Spawn {
         kind: String,
@@ -104,8 +147,11 @@ struct App {
     show_plain: bool,
     preview: Text<'static>,
     preview_width: u16,
-    preview_height: u16,
+    preview_height: usize,
     preview_cursor: Option<(u16, u16)>,
+    preview_identity: Option<(String, String)>,
+    preview_scroll: PreviewScroll,
+    preview_area: Rect,
     status: String,
     prompt: Option<PromptState>,
     confirm: Option<ConfirmAction>,
@@ -115,6 +161,7 @@ struct App {
     preview_min_width: u16,
     preview_visible: bool,
     animation_frame: usize,
+    close_on_focus: bool,
 }
 
 pub fn run(
@@ -122,6 +169,7 @@ pub fn run(
     origin: Option<String>,
     client: Option<String>,
     loaded: LoadedConfig,
+    popup: bool,
 ) -> Result<()> {
     // agentmux is a color-semantic TUI: state and captured pane colors carry
     // information, so preserve them even when the parent shell exports NO_COLOR.
@@ -130,20 +178,25 @@ pub fn run(
     // pane that now hosts this TUI: split-window/new-window give agentmux a new
     // TMUX_PANE.  Keep both identities so the all-panes view cannot preview the
     // TUI's own captured screen recursively.
-    let ui_pane_id = env::var("TMUX_PANE").ok();
+    let ui_pane_id = (!popup).then(|| env::var("TMUX_PANE").ok()).flatten();
     let origin = origin
-        .or_else(|| ui_pane_id.clone())
+        .or_else(|| env::var("TMUX_PANE").ok())
         .context("agentmux ui must run inside tmux or receive --origin")?;
     let snapshot = tmux.snapshot()?;
     let mut app = App::new(snapshot, &tmux, &origin, ui_pane_id, &loaded)?;
+    app.close_on_focus = popup;
     let pane_ids = app
         .snapshot
         .panes
         .iter()
         .map(|pane| pane.pane_id.clone())
         .collect();
-    let watcher = match watcher::start(&tmux, &origin, pane_ids) {
-        Ok(receiver) => Some(receiver),
+    let watcher = match if tmux.observer_socket().is_some() {
+        Ok(None)
+    } else {
+        watcher::start(&tmux, &origin, pane_ids).map(Some)
+    } {
+        Ok(receiver) => receiver,
         Err(error) => {
             app.status = format!("event watcher unavailable; Ctrl-G refresh: {error}");
             None
@@ -192,6 +245,9 @@ fn run_loop(
     let mut pending_status = false;
 
     loop {
+        if tmux.observer_socket().is_some() {
+            pending_status = true;
+        }
         terminal.draw(|frame| app.render(frame))?;
 
         if let Some(watcher) = watcher {
@@ -229,13 +285,7 @@ fn run_loop(
         }
         let command = match event::read()? {
             Event::Key(key) if key.kind == event::KeyEventKind::Press => app.handle_key(key),
-            Event::Mouse(mouse) => {
-                let changed = app.handle_mouse(mouse);
-                if changed {
-                    app.reload_preview(tmux);
-                }
-                None
-            }
+            Event::Mouse(mouse) => app.handle_mouse(mouse),
             Event::Resize(_, _) => {
                 app.reload_preview(tmux);
                 None
@@ -248,13 +298,19 @@ fn run_loop(
         };
         match command {
             UiCommand::Quit => break,
+            UiCommand::ScrollPreview(motion) => app.scroll_preview(tmux, motion),
             UiCommand::Refresh => {
                 app.reload(tmux);
                 app.reload_preview(tmux);
                 last_status = Instant::now();
             }
             UiCommand::Focus(pane) => match tmux.focus_pane(&pane, client) {
-                Ok(()) => app.status = format!("Focused {pane}"),
+                Ok(()) => {
+                    if app.close_on_focus {
+                        break;
+                    }
+                    app.status = format!("Focused {pane}");
+                }
                 Err(error) => app.status = error.to_string(),
             },
             UiCommand::Spawn {
@@ -274,10 +330,22 @@ fn run_loop(
                 break;
             }
             UiCommand::Send { pane, text } => {
-                if let Err(error) = tmux.send_text(&pane, &text, true) {
+                let send = (|| -> Result<()> {
+                    let target = tmux.resolve_pane(&pane)?;
+                    let info = crate::control::capabilities(tmux, &target)?;
+                    crate::control::execute(
+                        tmux,
+                        crate::control::Request {
+                            pane: pane.clone(),
+                            binding: info.binding,
+                            action: crate::control::Action::Send,
+                            text,
+                        },
+                    )
+                })();
+                if let Err(error) = send {
                     app.status = error.to_string();
                 } else {
-                    let _ = tmux.set_status(&pane, "working", Some("prompt sent"), 15);
                     app.status = format!("sent prompt to {pane}");
                     app.reload(tmux);
                     app.reload_preview(tmux);
@@ -316,6 +384,11 @@ fn run_loop(
                 Err(error) => app.status = error.to_string(),
             },
         }
+        if let Some(path) = tmux.observer_socket() {
+            if let Err(error) = crate::observer::refresh(path) {
+                app.status = error.to_string();
+            }
+        }
     }
     Ok(())
 }
@@ -344,6 +417,9 @@ impl App {
             preview_width: 0,
             preview_height: 0,
             preview_cursor: None,
+            preview_identity: None,
+            preview_scroll: PreviewScroll::default(),
+            preview_area: Rect::default(),
             status: loaded
                 .warning
                 .clone()
@@ -356,6 +432,7 @@ impl App {
             preview_min_width: loaded.config.ui.preview_min_width,
             preview_visible: false,
             animation_frame: 0,
+            close_on_focus: false,
         };
         if app.snapshot.pane(origin).is_some() {
             app.selected_pane = Some(origin.to_owned());
@@ -389,6 +466,7 @@ impl App {
                     .state
                     .priority()
                     .cmp(&left.state.priority())
+                    .then_with(|| right.state_seq.cmp(&left.state_seq))
                     .then_with(|| left.session_name.cmp(&right.session_name))
                     .then_with(|| left.window_index.cmp(&right.window_index))
                     .then_with(|| left.pane_index.cmp(&right.pane_index))
@@ -417,7 +495,7 @@ impl App {
 
     fn selected_target(&self) -> Option<String> {
         match self.focus {
-            FocusPanel::Agents => self.selected_pane.clone(),
+            FocusPanel::Agents | FocusPanel::Preview => self.selected_pane.clone(),
             FocusPanel::Spaces => self
                 .snapshot
                 .spaces
@@ -478,6 +556,7 @@ impl App {
                 let next = offset_index(self.selected_visible_index(), delta, visible.len());
                 self.selected_pane = Some(self.snapshot.panes[visible[next]].pane_id.clone());
             }
+            FocusPanel::Preview => {}
         }
     }
 
@@ -498,7 +577,18 @@ impl App {
     }
 
     fn reload_preview(&mut self, tmux: &Tmux) {
+        let identity = self
+            .selected()
+            .map(|pane| (pane.pane_id.clone(), pane.instance_id.clone()));
+        if self.preview_identity != identity {
+            self.preview_identity = identity;
+            self.preview_scroll.top = None;
+        }
         if !self.preview_visible {
+            return;
+        }
+        // New output must not move text underneath someone reading history.
+        if self.preview_scroll.top.is_some() {
             return;
         }
         let Some(pane) = self.selected_pane.clone() else {
@@ -516,7 +606,7 @@ impl App {
                     .into_text()
                     .unwrap_or_else(|_| Text::raw(strip_ansi(&view.ansi)));
                 self.preview_width = view.width;
-                self.preview_height = view.height;
+                self.preview_height = usize::from(view.height);
                 self.preview_cursor = Some((view.cursor_x, view.cursor_y));
             }
             Err(error) => {
@@ -525,6 +615,54 @@ impl App {
                 self.preview_height = 0;
                 self.preview_cursor = None;
             }
+        }
+    }
+
+    fn scroll_preview(&mut self, tmux: &Tmux, motion: PreviewMotion) {
+        if !self.preview_visible || self.preview_area.height <= 2 {
+            return;
+        }
+        self.focus = FocusPanel::Preview;
+        self.reload_preview(tmux);
+        if matches!(motion, PreviewMotion::Bottom) {
+            self.preview_scroll.top = None;
+            self.reload_preview(tmux);
+            return;
+        }
+        if self.preview_scroll.top.is_none() {
+            if matches!(
+                motion,
+                PreviewMotion::Lines(0..)
+                    | PreviewMotion::Pages(0..)
+                    | PreviewMotion::HalfPages(0..)
+            ) {
+                return;
+            }
+            let Some(pane) = self.selected_pane.as_deref() else {
+                return;
+            };
+            match tmux.pane_history(pane) {
+                Ok(ansi) => {
+                    self.preview = ansi
+                        .as_bytes()
+                        .into_text()
+                        .unwrap_or_else(|_| Text::raw(strip_ansi(&ansi)));
+                    self.preview_height = self.preview.lines.len();
+                    self.preview_cursor = None;
+                }
+                Err(error) => {
+                    self.status = format!("history unavailable: {error}");
+                    return;
+                }
+            }
+        }
+        self.preview_scroll.move_by(
+            motion,
+            self.preview_height,
+            self.preview_area.height.saturating_sub(2),
+        );
+        if self.preview_scroll.top.is_none() {
+            self.reload_preview(tmux);
         }
     }
 
@@ -552,6 +690,12 @@ impl App {
         }
         if key.modifiers.contains(KeyModifiers::CONTROL) {
             return match key.code {
+                KeyCode::Char('u') if self.focus == FocusPanel::Preview => {
+                    Some(UiCommand::ScrollPreview(PreviewMotion::HalfPages(-1)))
+                }
+                KeyCode::Char('d') if self.focus == FocusPanel::Preview => {
+                    Some(UiCommand::ScrollPreview(PreviewMotion::HalfPages(1)))
+                }
                 KeyCode::Char('g') => Some(UiCommand::Refresh),
                 KeyCode::Char('s') => {
                     let pane = self.selected_pane.clone()?;
@@ -577,19 +721,42 @@ impl App {
                     });
                     None
                 }
-                KeyCode::Char('u') => self.selected_pane.clone().map(UiCommand::Unmark),
+                KeyCode::Char('u') => {
+                    self.confirm = self.selected_pane.clone().map(ConfirmAction::Unmark);
+                    None
+                }
                 _ => None,
             };
         }
         match key.code {
             KeyCode::Char('q') | KeyCode::Esc => Some(UiCommand::Quit),
             KeyCode::Enter => self.selected_target().map(UiCommand::Focus),
+            KeyCode::PageUp => Some(UiCommand::ScrollPreview(PreviewMotion::Pages(-1))),
+            KeyCode::PageDown => Some(UiCommand::ScrollPreview(PreviewMotion::Pages(1))),
             KeyCode::Tab | KeyCode::BackTab => {
-                self.focus = match self.focus {
-                    FocusPanel::Spaces => FocusPanel::Agents,
-                    FocusPanel::Agents => FocusPanel::Spaces,
+                self.focus = match (self.focus, key.code == KeyCode::BackTab) {
+                    (FocusPanel::Spaces, false) | (FocusPanel::Preview, true) => FocusPanel::Agents,
+                    (FocusPanel::Agents, false) | (FocusPanel::Spaces, true)
+                        if self.preview_visible =>
+                    {
+                        FocusPanel::Preview
+                    }
+                    (FocusPanel::Spaces, true) => FocusPanel::Agents,
+                    _ => FocusPanel::Spaces,
                 };
                 None
+            }
+            KeyCode::Down | KeyCode::Char('j') if self.focus == FocusPanel::Preview => {
+                Some(UiCommand::ScrollPreview(PreviewMotion::Lines(1)))
+            }
+            KeyCode::Up | KeyCode::Char('k') if self.focus == FocusPanel::Preview => {
+                Some(UiCommand::ScrollPreview(PreviewMotion::Lines(-1)))
+            }
+            KeyCode::Home | KeyCode::Char('g') if self.focus == FocusPanel::Preview => {
+                Some(UiCommand::ScrollPreview(PreviewMotion::Top))
+            }
+            KeyCode::End | KeyCode::Char('G') if self.focus == FocusPanel::Preview => {
+                Some(UiCommand::ScrollPreview(PreviewMotion::Bottom))
             }
             KeyCode::Down | KeyCode::Char('j') => {
                 self.move_selection(1);
@@ -689,11 +856,17 @@ impl App {
     }
 
     fn handle_confirm_key(&mut self, key: KeyEvent) -> Option<UiCommand> {
+        // Registration removal defaults to cancel, including a bare Enter.
+        if key.code == KeyCode::Enter && matches!(self.confirm, Some(ConfirmAction::Unmark(_))) {
+            self.confirm = None;
+            return None;
+        }
         match key.code {
             KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter => {
                 match self.confirm.take()? {
                     ConfirmAction::Kill(pane) => Some(UiCommand::Kill(pane)),
                     ConfirmAction::Respawn(pane) => Some(UiCommand::Respawn(pane)),
+                    ConfirmAction::Unmark(pane) => Some(UiCommand::Unmark(pane)),
                 }
             }
             KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
@@ -704,15 +877,35 @@ impl App {
         }
     }
 
-    fn handle_mouse(&mut self, mouse: MouseEvent) -> bool {
+    fn handle_mouse(&mut self, mouse: MouseEvent) -> Option<UiCommand> {
+        if self.prompt.is_some() || self.confirm.is_some() {
+            return None;
+        }
         match mouse.kind {
-            MouseEventKind::ScrollDown => {
-                self.move_selection(1);
-                true
-            }
-            MouseEventKind::ScrollUp => {
-                self.move_selection(-1);
-                true
+            MouseEventKind::ScrollDown | MouseEventKind::ScrollUp => {
+                let delta = if mouse.kind == MouseEventKind::ScrollUp {
+                    -1
+                } else {
+                    1
+                };
+                if self.preview_visible && contains(self.preview_area, mouse.column, mouse.row) {
+                    return Some(UiCommand::ScrollPreview(PreviewMotion::Lines(delta * 3)));
+                }
+                if self
+                    .space_rows
+                    .iter()
+                    .any(|(rect, _)| contains(*rect, mouse.column, mouse.row))
+                {
+                    self.focus = FocusPanel::Spaces;
+                } else if self
+                    .agent_rows
+                    .iter()
+                    .any(|(rect, _)| contains(*rect, mouse.column, mouse.row))
+                {
+                    self.focus = FocusPanel::Agents;
+                }
+                self.move_selection(delta);
+                None
             }
             MouseEventKind::Down(MouseButton::Left) => {
                 if let Some((_, index)) = self
@@ -722,7 +915,7 @@ impl App {
                 {
                     self.focus = FocusPanel::Spaces;
                     self.space_index = *index;
-                    return true;
+                    return None;
                 }
                 if let Some((_, pane)) = self
                     .agent_rows
@@ -731,11 +924,14 @@ impl App {
                 {
                     self.focus = FocusPanel::Agents;
                     self.selected_pane = Some(pane.clone());
-                    return true;
+                    return None;
                 }
-                false
+                if self.preview_visible && contains(self.preview_area, mouse.column, mouse.row) {
+                    self.focus = FocusPanel::Preview;
+                }
+                None
             }
-            _ => false,
+            _ => None,
         }
     }
 
@@ -748,11 +944,16 @@ impl App {
             .constraints([Constraint::Min(5), Constraint::Length(2)])
             .split(frame.area());
         self.preview_visible = preview_is_visible(outer[0].width, self.preview_min_width);
+        self.preview_area = Rect::default();
+        if !self.preview_visible && self.focus == FocusPanel::Preview {
+            self.focus = FocusPanel::Agents;
+        }
         let body = if self.preview_visible {
             let columns = Layout::default()
                 .direction(Direction::Horizontal)
                 .constraints([Constraint::Percentage(38), Constraint::Percentage(62)])
                 .split(outer[0]);
+            self.preview_area = columns[1];
             self.render_preview(frame, columns[1]);
             columns[0]
         } else {
@@ -957,13 +1158,33 @@ impl App {
             area.width.saturating_sub(3),
             1.min(area.height),
         );
+        let viewport_height = area.height.saturating_sub(2);
+        let scroll = self
+            .preview_scroll
+            .offset(self.preview_height, viewport_height);
+        let mode = if self.preview_scroll.top.is_some() {
+            format!(
+                "  history · {}-{}/{} · End: live",
+                scroll + 1,
+                (scroll + usize::from(viewport_height)).min(self.preview_height),
+                self.preview_height
+            )
+        } else {
+            "  live · auto-follow".into()
+        };
         frame.render_widget(
             Paragraph::new(Line::from(vec![
                 Span::styled(
                     truncate(name, 32),
-                    Style::default().fg(TEXT).add_modifier(Modifier::BOLD),
+                    Style::default()
+                        .fg(if self.focus == FocusPanel::Preview {
+                            ACCENT
+                        } else {
+                            TEXT
+                        })
+                        .add_modifier(Modifier::BOLD),
                 ),
-                Span::styled("  live · auto-follow", Style::default().fg(SUBTEXT1)),
+                Span::styled(mode, Style::default().fg(SUBTEXT1)),
             ])),
             title_area,
         );
@@ -973,18 +1194,28 @@ impl App {
             area.width.saturating_sub(3),
             area.height.saturating_sub(2),
         );
-        let scroll = preview_vertical_scroll(self.preview_height, inner.height);
-        let paragraph = Paragraph::new(self.preview.clone()).scroll((scroll, 0));
+        // Slice before rendering: Paragraph's scroll offset is u16, while tmux
+        // and ACP histories can contain more than 65,535 lines.
+        let visible: Vec<_> = self
+            .preview
+            .lines
+            .iter()
+            .skip(scroll)
+            .take(usize::from(inner.height))
+            .cloned()
+            .collect();
+        let paragraph = Paragraph::new(Text::from(visible));
         frame.render_widget(paragraph, inner);
-        if self.prompt.is_none() && self.confirm.is_none() {
+        if self.preview_scroll.top.is_none() && self.prompt.is_none() && self.confirm.is_none() {
             if let Some((cursor_x, cursor_y)) = self.preview_cursor {
+                let cursor_y = usize::from(cursor_y);
                 if cursor_x < self.preview_width.min(inner.width)
                     && cursor_y >= scroll
-                    && cursor_y - scroll < inner.height
+                    && cursor_y - scroll < usize::from(inner.height)
                 {
                     frame.set_cursor_position(Position::new(
                         inner.x.saturating_add(cursor_x),
-                        inner.y.saturating_add(cursor_y - scroll),
+                        inner.y.saturating_add((cursor_y - scroll) as u16),
                     ));
                 }
             }
@@ -999,9 +1230,25 @@ impl App {
             Span::raw(" move  "),
             Span::styled("Enter", key_style()),
             Span::raw(" focus  "),
+            Span::styled(
+                if self.focus == FocusPanel::Preview {
+                    "PgUp/Dn Ctrl-u/d"
+                } else {
+                    "PgUp/Dn"
+                },
+                key_style(),
+            ),
+            Span::raw(" scroll  "),
             Span::styled("Alt-c/l/o/n", key_style()),
             Span::raw(" spawn  "),
-            Span::styled("Ctrl-s/r/k/m/u", key_style()),
+            Span::styled(
+                if self.focus == FocusPanel::Preview {
+                    "Ctrl-s/r/k/m"
+                } else {
+                    "Ctrl-s/r/k/m/u"
+                },
+                key_style(),
+            ),
             Span::raw(" act  "),
             Span::styled("a", key_style()),
             Span::raw(" all  "),
@@ -1050,6 +1297,7 @@ impl App {
         let message = match confirm {
             ConfirmAction::Kill(pane) => format!("Kill {pane}? [y/N]"),
             ConfirmAction::Respawn(pane) => format!("Respawn {pane}? [y/N]"),
+            ConfirmAction::Unmark(pane) => format!("Remove agent registration for {pane}? [y/N]"),
         };
         let area = centered_rect(55, 5, frame.area());
         frame.render_widget(Clear, area);
@@ -1150,10 +1398,6 @@ fn pane_is_visible(
     ui_pane_id != Some(pane_id) && (show_plain || is_agent)
 }
 
-fn preview_vertical_scroll(source_height: u16, viewport_height: u16) -> u16 {
-    source_height.saturating_sub(viewport_height)
-}
-
 fn contains(rect: Rect, column: u16, row: u16) -> bool {
     column >= rect.x
         && column < rect.x.saturating_add(rect.width)
@@ -1244,8 +1488,52 @@ mod tests {
 
     #[test]
     fn preview_crops_visible_screen_from_the_bottom() {
-        assert_eq!(preview_vertical_scroll(40, 24), 16);
-        assert_eq!(preview_vertical_scroll(24, 40), 0);
+        let scroll = PreviewScroll::default();
+        assert_eq!(scroll.offset(40, 24), 16);
+        assert_eq!(scroll.offset(24, 40), 0);
+        assert_eq!(scroll.offset(100, 24), 76);
+    }
+
+    #[test]
+    fn history_pages_overlap_and_resume_follow_at_bottom() {
+        let mut scroll = PreviewScroll::default();
+        scroll.move_by(PreviewMotion::Pages(-1), 100, 20);
+        assert_eq!(scroll.top, Some(61));
+        scroll.move_by(PreviewMotion::Lines(-3), 100, 20);
+        assert_eq!(scroll.top, Some(58));
+        scroll.move_by(PreviewMotion::Pages(1), 100, 20);
+        assert_eq!(scroll.top, Some(77));
+        scroll.move_by(PreviewMotion::Lines(3), 100, 20);
+        assert_eq!(scroll.top, None);
+        assert_eq!(scroll.offset(130, 20), 110);
+    }
+
+    #[test]
+    fn history_half_pages_preserve_overlap_and_return_to_live() {
+        let mut scroll = PreviewScroll::default();
+        scroll.move_by(PreviewMotion::HalfPages(-1), 100, 21);
+        assert_eq!(scroll.top, Some(69));
+        scroll.move_by(PreviewMotion::HalfPages(1), 100, 21);
+        assert_eq!(scroll.top, None);
+        scroll.move_by(PreviewMotion::HalfPages(-1), 100, 1);
+        assert_eq!(scroll.top, Some(98));
+    }
+
+    #[test]
+    fn history_handles_large_scrollback_and_viewport_resizes() {
+        let mut scroll = PreviewScroll::default();
+        scroll.move_by(PreviewMotion::Lines(-3), 100_000, 20);
+        assert_eq!(scroll.top, Some(99_977));
+        assert_eq!(scroll.offset(100_000, 10), 99_977);
+        assert_eq!(scroll.offset(100_000, 30), 99_970);
+        scroll.move_by(PreviewMotion::Top, 100_000, 30);
+        assert_eq!(scroll.top, Some(0));
+        scroll.move_by(PreviewMotion::Lines(isize::MIN), 100_000, 30);
+        assert_eq!(scroll.top, Some(0));
+        scroll.move_by(PreviewMotion::Bottom, 100_000, 30);
+        assert_eq!(scroll.top, None);
+        scroll.move_by(PreviewMotion::Top, 3, 30);
+        assert_eq!(scroll.top, None);
     }
 
     #[test]

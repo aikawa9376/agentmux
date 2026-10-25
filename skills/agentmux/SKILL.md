@@ -72,7 +72,7 @@ agentmux mark "$NEW_PANE" --kind custom-agent --name reviewer
 
 ## Send a task
 
-Prefer agentmux for natural-language prompts. It sends literal text followed by Enter and publishes a short working state:
+Prefer agentmux for natural-language prompts. It revalidates the live agent and uses terminal paste or its published ACP bridge. Blocked agents reject prompts; inspect their actual pane and use deliberate key input to answer:
 
 ```sh
 agentmux send "$NEW_PANE" --text 'Review src/api and report concrete correctness issues.'
@@ -89,6 +89,15 @@ tmux send-keys -t "$NEW_PANE" Enter
 Never interpolate untrusted text into a tmux shell command. Use `agentmux send` or `tmux send-keys -l` for text.
 
 ## Wait
+
+For a prompt followed by completion, keep submission and the wait together:
+
+```sh
+agentmux send "$NEW_PANE" --text 'Review src/api and report concrete issues.' \
+  --wait --timeout 120000
+```
+
+This observes activity after submission before accepting idle/done/blocked. A standalone `agentmux wait "$NEW_PANE" --until done --until blocked --timeout 120000` returns immediately if the current state already matches. Results are JSON; timeouts are milliseconds. An observer restart or agent replacement interrupts the wait. A timeout does not prove no input was delivered: read before retrying.
 
 Locate this skill's helper at `${CODEX_HOME:-$HOME/.codex}/skills/agentmux/scripts/wait.py`. If installed elsewhere, resolve `scripts/wait.py` relative to this `SKILL.md`.
 
@@ -113,7 +122,7 @@ python "$HOME/.codex/skills/agentmux/scripts/wait.py" status "$NEW_PANE" \
   --status idle --timeout 120000
 ```
 
-`done` currently requires a native integration that publishes done. Screen-only agents usually settle at `idle`, so prefer `idle` unless `agentmux list --json` shows native done support.
+The shared observer retains working-to-idle completion as `done` until seen. Reads do not mark completion seen; explicit focus updates the CLI's seen state, while TUI viewers track their own seen state. `unknown` does not prove completion. The polling helper remains useful for output waits, but a separate send followed by helper polling cannot correlate a new task with its completion.
 
 ## Coordinate another agent
 

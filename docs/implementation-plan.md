@@ -1,8 +1,12 @@
 # agentmux 実装計画
 
+現在の方針（2026-10-25）: 検出更新、共有監視、未読完了・通知・送信待機とoptional popupを採用。Git/worktree管理と独自SSH集約は対象外。[現行設計](design/observer-and-popup.md)と[機能表](parity-matrix.md)を優先し、以下は当初の広い計画として参照する。
+
 最終更新: 2026-07-10  
 機能基準: Herdr v0.7.3  
 現行互換基準: dotfiles の Bash 版 agentmux (`1e4d5540`)
+
+2026-10-25追記: この文書は当初のP0〜P9計画を残している。最新の比較基準はHerdr v0.9.5で、[追従調査と推奨順序](research/herdr-v0.9.5.md)および[現状の比較表](parity-matrix.md)を参照。UIのpopup前提は通常pane/windowへ変更済み（`contrib/agentmux.tmux`）。LAN/Android mirrorの送信・中断も実装済み。以下の完成イメージやdaemon/API案は、未実装項目を含む計画であり現在のCLI仕様ではない。
 
 実装状況 (2026-07-11): P0 の Cargo/test/control-mode spike と、P1 の usable MVP を実装済み。Linux/tmux 3.7b で unit test、isolated tmux integration、実TUI captureを検証した。LazyAgent buffer ACPは`publish` / owner-safe `withdraw`でnative lifecycleを公開する。P1 の残りは Bash differential test の拡充、macOS/対応tmux下限のCI、install migrationである。
 

@@ -12,3 +12,6 @@ bind-key -n M-a split-window -h -l 48% -c "#{pane_current_path}" \
 # Full-window dashboard, also backed by an ordinary tmux pane.
 bind-key a new-window -n agentmux -c "#{pane_current_path}" \
   "agentmux ui '#{pane_id}' --client '#{client_name}'"
+
+# Floating dashboard; the launcher selects this client and keeps the pane layout.
+bind-key A run-shell -b "agentmux ui '#{pane_id}' --client '#{client_name}' --popup"

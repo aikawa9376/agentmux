@@ -19,3 +19,12 @@ hermes, kiro, maki, muse, qwen. Other manifests are unchanged from v0.7.3.
 Local modification: github-copilot retains the agentmux folder-trust rule.
 The detector remains adapted from the original AGPL-3.0-or-later source;
 agentmux's overall license remains AGPL-3.0-or-later.
+
+Detection manifests refreshed from https://github.com/herdrdev/herdr
+Release: v0.9.5
+Revision: 2ecf19a92fc3a7fff75b6ce3655ef04f4625ec01
+Upstream license at this revision: Apache License 2.0 (see licenses/Herdr-Apache-2.0.txt).
+Updated manifests: antigravity, claude, cline, codex, grok, kiro, pi.
+New manifest: letta.
+Local modification: codex's working timer also accepts the older middle-dot
+interrupt separator. github-copilot's existing folder-trust extension is retained.

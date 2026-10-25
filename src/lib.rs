@@ -2,6 +2,8 @@ pub mod config;
 pub mod control;
 pub mod detect;
 pub mod model;
+pub mod observer;
+pub mod popup;
 pub mod remote;
 pub mod tmux;
 pub mod tui;

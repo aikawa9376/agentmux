@@ -6,6 +6,23 @@ use std::{env, fs, path::PathBuf};
 pub struct Config {
     pub ui: UiConfig,
     pub refresh: RefreshConfig,
+    pub notifications: NotificationConfig,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct NotificationConfig {
+    pub tmux: bool,
+    pub system: bool,
+}
+
+impl Default for NotificationConfig {
+    fn default() -> Self {
+        Self {
+            tmux: true,
+            system: false,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -90,6 +107,10 @@ show_plain_panes = false
 [refresh]
 preview_ms = 50
 status_ms = 250
+
+[notifications]
+tmux = true
+system = false
 "#
     }
 }

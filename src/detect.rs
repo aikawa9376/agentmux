@@ -4,6 +4,8 @@ use std::sync::OnceLock;
 
 mod manifest;
 
+pub use manifest::{DetectionExplanation, explain};
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DetectedStatus {
     pub state: AgentState,
@@ -31,6 +33,8 @@ pub fn detect_agent_command(command: &str) -> Option<String> {
     }
 
     const AGENTS: &[(&str, &str)] = &[
+        ("letta-code", "letta"),
+        ("letta", "letta"),
         ("muse-code", "muse"),
         ("muse-cli", "muse"),
         ("qwen-code", "qwen"),

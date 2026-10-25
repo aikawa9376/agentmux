@@ -6,6 +6,7 @@
 use crate::model::AgentState;
 use regex::Regex;
 use serde::Deserialize;
+use serde::Serialize;
 use std::{collections::HashMap, sync::OnceLock};
 
 use super::DetectedStatus;
@@ -101,6 +102,9 @@ struct CompiledManifest {
     id: String,
     aliases: Vec<String>,
     rules: Vec<CompiledRule>,
+    source: String,
+    version: Option<String>,
+    warning: Option<String>,
 }
 
 #[derive(Debug)]
@@ -135,6 +139,7 @@ const BUNDLED: &[(&str, &str)] = &[
     ("kilo", include_str!("manifests/kilo.toml")),
     ("kimi", include_str!("manifests/kimi.toml")),
     ("kiro", include_str!("manifests/kiro.toml")),
+    ("letta", include_str!("manifests/letta.toml")),
     ("opencode", include_str!("manifests/opencode.toml")),
     ("maki", include_str!("manifests/maki.toml")),
     ("muse", include_str!("manifests/muse.toml")),
@@ -144,6 +149,55 @@ const BUNDLED: &[(&str, &str)] = &[
 ];
 
 static MANIFESTS: OnceLock<HashMap<String, CompiledManifest>> = OnceLock::new();
+
+#[derive(Debug, Serialize)]
+pub struct DetectionExplanation {
+    pub source: String,
+    pub version: Option<String>,
+    pub warning: Option<String>,
+    pub rules: Vec<RuleExplanation>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct RuleExplanation {
+    pub id: String,
+    pub region: String,
+    pub priority: i32,
+    pub matched: bool,
+    pub region_bytes: usize,
+    pub visible_idle: bool,
+    pub visible_blocker: bool,
+    pub visible_working: bool,
+    pub skip_state_update: bool,
+}
+
+pub fn explain(kind: &str, screen: &str, title: &str) -> Option<DetectionExplanation> {
+    let manifest = manifests().get(canonical_kind(kind)?)?;
+    Some(DetectionExplanation {
+        source: manifest.source.clone(),
+        version: manifest.version.clone(),
+        warning: manifest.warning.clone(),
+        rules: manifest
+            .rules
+            .iter()
+            .map(|compiled| {
+                let rule = &compiled.rule;
+                let text = region(screen, title, &rule.region);
+                RuleExplanation {
+                    id: rule.id.clone(),
+                    region: rule.region.clone(),
+                    priority: rule.priority,
+                    matched: gate_matches(&compiled.gate, text),
+                    region_bytes: text.len(),
+                    visible_idle: rule.visible_idle,
+                    visible_blocker: rule.visible_blocker,
+                    visible_working: rule.visible_working,
+                    skip_state_update: rule.skip_state_update,
+                }
+            })
+            .collect(),
+    })
+}
 
 pub(super) fn canonical_kind(label: &str) -> Option<&'static str> {
     let lower = label.trim().to_ascii_lowercase();
@@ -188,8 +242,7 @@ fn manifests() -> &'static HashMap<String, CompiledManifest> {
         BUNDLED
             .iter()
             .map(|(id, source)| {
-                let parsed: Manifest = toml::from_str(source)
-                    .unwrap_or_else(|error| panic!("invalid bundled {id} manifest: {error}"));
+                let (parsed, origin, warning) = load_manifest(id, source);
                 assert!(
                     parsed.min_engine_version.unwrap_or(1) <= 3,
                     "unsupported engine version in {id}"
@@ -216,11 +269,89 @@ fn manifests() -> &'static HashMap<String, CompiledManifest> {
                         id: parsed.id,
                         aliases: parsed.aliases,
                         rules,
+                        source: origin,
+                        version: parsed.version,
+                        warning,
                     },
                 )
             })
             .collect()
     })
+}
+
+fn load_manifest(id: &str, bundled: &str) -> (Manifest, String, Option<String>) {
+    let base = std::env::var_os("XDG_CONFIG_HOME")
+        .map(std::path::PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|p| std::path::PathBuf::from(p).join(".config")));
+    let path = base.map(|p| {
+        p.join("agentmux/agent-detection")
+            .join(format!("{id}.toml"))
+    });
+    let mut warning = None;
+    if let Some(path) = path {
+        match std::fs::read_to_string(&path) {
+            Ok(text) => match validate_override(id, &text) {
+                Ok(parsed) => return (parsed, path.display().to_string(), None),
+                Err(error) => {
+                    warning = Some(format!("{}: {error}; using bundled rules", path.display()))
+                }
+            },
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                warning = Some(format!("{}: {error}; using bundled rules", path.display()))
+            }
+        }
+    }
+    (
+        toml::from_str(bundled).expect("valid bundled manifest"),
+        "bundled".into(),
+        warning,
+    )
+}
+
+fn validate_override(id: &str, text: &str) -> anyhow::Result<Manifest> {
+    let parsed: Manifest = toml::from_str(text)?;
+    anyhow::ensure!(parsed.id == id, "manifest id must be {id}");
+    anyhow::ensure!(
+        parsed.min_engine_version.unwrap_or(1) <= 3,
+        "unsupported engine version"
+    );
+    for rule in &parsed.rules {
+        let spec = rule.region.as_str();
+        anyhow::ensure!(
+            matches!(
+                spec,
+                "whole_recent"
+                    | "osc_title"
+                    | "osc_progress"
+                    | "after_last_prompt_marker"
+                    | "before_current_prompt_marker"
+                    | "whole_recent_without_current_prompt_marker"
+                    | "current_prompt_block_marker"
+                    | "after_current_prompt_block_marker"
+                    | "prompt_box_body"
+                    | "above_prompt_box"
+                    | "last_non_empty_above_prompt_box"
+                    | "after_last_horizontal_rule"
+            ) || [
+                "bottom_lines",
+                "bottom_non_empty_lines",
+                "top_non_empty_lines"
+            ]
+            .iter()
+            .any(|name| region_count(spec, name).is_some()),
+            "unknown region {spec}"
+        );
+        compile_gate(Gate {
+            all: rule.all.clone(),
+            any: rule.any.clone(),
+            not_gate: rule.not_gate.clone(),
+            contains: rule.contains.clone(),
+            regex: rule.regex.clone(),
+            line_regex: rule.line_regex.clone(),
+        })?;
+    }
+    Ok(parsed)
 }
 
 fn compile_gate(gate: Gate) -> Result<CompiledGate, regex::Error> {
@@ -485,6 +616,85 @@ mod tests {
     use super::*;
 
     #[test]
+    fn v095_ui_fixtures_cover_changed_prompts_and_letta() {
+        let cases = [
+            (
+                "codex",
+                "Folder access\nTrust this folder?\nCodex can read, edit, and run files here\nTrust and continue",
+                AgentState::Blocked,
+            ),
+            (
+                "codex",
+                "Update available · v1\nenter continue · esc skip",
+                AgentState::Blocked,
+            ),
+            (
+                "codex",
+                "Searching files (12s • ctrl+x to interrupt)\n› next question",
+                AgentState::Working,
+            ),
+            (
+                "claude",
+                "Enter to select · arrow keys to navigate · Esc to cancel\n──────",
+                AgentState::Blocked,
+            ),
+            (
+                "cline",
+                "Cline needs permission\nApprove tool call?\n[y] Approve [n] Deny",
+                AgentState::Blocked,
+            ),
+            (
+                "kiro",
+                "kiro is working · type to steer · ctrl+s to queue",
+                AgentState::Working,
+            ),
+            ("pi", "── ⠋ Working ──────────", AgentState::Working),
+            (
+                "agy",
+                "Do you trust the contents of this project?\nYes, I trust this folder\nEnter confirm",
+                AgentState::Blocked,
+            ),
+            ("grok", "· 2 │ background jobs", AgentState::Idle),
+            (
+                "letta",
+                "Run this command?\nEnter to select · Esc to cancel",
+                AgentState::Blocked,
+            ),
+            ("letta-code", "›", AgentState::Idle),
+        ];
+        for (kind, screen, state) in cases {
+            assert_eq!(
+                detect(kind, screen, "").unwrap().state,
+                state,
+                "{kind}: {screen}"
+            );
+        }
+    }
+
+    #[test]
+    fn overrides_validate_schema_regex_and_engine_before_replacing_bundled_rules() {
+        let valid =
+            "id = 'codex'\nrules = [{ id = 'custom', state = 'blocked', contains = ['CUSTOM'] }]";
+        assert!(validate_override("codex", valid).is_ok());
+        assert!(validate_override("claude", valid).is_err());
+        assert!(
+            validate_override(
+                "codex",
+                &valid.replace("contains = ['CUSTOM']", "regex = ['[']")
+            )
+            .is_err()
+        );
+        assert!(
+            validate_override(
+                "codex",
+                &valid.replace("contains = ['CUSTOM']", "region = 'typo'")
+            )
+            .is_err()
+        );
+        assert!(validate_override("codex", &format!("min_engine_version = 4\n{valid}")).is_err());
+    }
+
+    #[test]
     fn current_upstream_ui_states() {
         let fixtures = [
             ("claude", "", "◐ project", AgentState::Working),
@@ -525,7 +735,7 @@ mod tests {
                 AgentState::Working,
             ),
             ("codex", "› Explain the text [y/n]", "", AgentState::Idle),
-            ("grok", "· 2 │ project", "grok", AgentState::Working),
+            ("grok", "· 2 │ project", "grok", AgentState::Idle),
             ("amp", "", "Plugin confirmation needed", AgentState::Blocked),
             ("hermes", "", "⏳ project", AgentState::Working),
             ("maki", " ⠋ [BUILD] project", "", AgentState::Working),
@@ -695,7 +905,11 @@ mod tests {
             ),
             ("kilo", "△ Permission required", AgentState::Blocked),
             ("kimi", "🌕", AgentState::Working),
-            ("kiro", "Kiro is working", AgentState::Working),
+            (
+                "kiro",
+                "Kiro is working · type to steer · ctrl+s to queue",
+                AgentState::Working,
+            ),
             ("opencode", "△ Permission required", AgentState::Blocked),
             ("pi", "Working...", AgentState::Working),
             ("qodercli", "Permission required", AgentState::Blocked),

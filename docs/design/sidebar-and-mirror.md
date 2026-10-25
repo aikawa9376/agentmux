@@ -1,5 +1,7 @@
 # Sidebar and mirror design
 
+Shared semantic state, current send/wait behavior, and optional tmux popup presentation are specified in [Observer and popup design](observer-and-popup.md). The normal pane/window UI retains the navigation behavior below.
+
 ## Visibility and navigation
 
 `src/tui.rs::pane_is_visible` strictly filters plain panes in agent-only mode, even with zero agents. `App::ensure_visible_selection` rebuilds spaces from visible panes and clears an invisible selection. The `a` key explicitly enables ordinary panes; the TUI's own pane remains excluded.
@@ -11,6 +13,20 @@
 `src/tmux.rs::Tmux::pane_view` uses a published transcript when `@agent_preview_path` is set or `@agent_status_owner` is `lazyagent`. Missing files, absent transcript paths, or stopped publishers yield an error instead of capturing the editor's current buffer. `tests/tmux_smoke.rs::editor_publish_and_owner_safe_withdraw_flow_into_snapshot` covers these cases.
 
 LazyAgent's integration selects an ACP session by status priority and publishes that session's transcript. Multiple hosted ACP sessions still share one tmux pane identity. Independent thread selection and metadata lifecycle races beyond the tested conditions remain outside this change.
+
+## Preview scrolling
+
+The TUI cycles focus between spaces, agents, and the visible preview with Tab/Shift-Tab. PageUp/PageDown scroll the preview from any panel. With preview focus, j/k or arrows scroll one row, Ctrl-u/Ctrl-d scroll half a page, Home/g goes to the oldest retained row, and End/G resumes live output. Wheel events over the preview scroll three rows; wheel events over list rows move that list's selection. Prompt and confirmation dialogs consume input without changing the underlying selection.
+
+Ctrl-u in a list opens a registration-removal confirmation rather than immediately unmarking the selected agent. Only y/Y confirms this removal; Enter, Esc, and n/N cancel it. Preview Ctrl-u always scrolls and never opens that confirmation. This distinction matters especially for published ACP agents: `Tmux::unmark` clears identity and native status/owner fields, so agent-only filtering removes the pane until the publisher republishes. It does not delete the transcript or stop its agent. The footer reflects the focused panel's Ctrl-u meaning.
+
+`Tmux::pane_view` remains a visible-screen read for normal panes and a bounded 256 KiB transcript tail for ACP. The LAN mirror retains this interface. On the first upward scroll, `Tmux::pane_history` captures all currently retained tmux rows with `capture-pane -ep -S -`, or reads the complete published ACP transcript. Both use the same publisher-liveness/path validation. Transcript reads stop at the file size observed when opened instead of chasing concurrent appends. History is loaded only on demand, into the TUI process; the observer does not retain screen history.
+
+History mode freezes the captured text and its top row while output continues. Periodic preview reads do not replace it. Reaching the captured bottom or choosing End/G returns to current live output, including output received while reading. Changing pane or observer instance identity discards frozen history, including a changed ACP transcript path. Resizing preserves the snapshot and clamps the visible offset. The title distinguishes `history` with a row range from `live · auto-follow`; the live terminal cursor is hidden during history viewing. Rendering slices rows with a `usize` index before passing them to Ratatui, so histories beyond 65,535 rows do not wrap a u16 scroll offset.
+
+These operations are passive: they do not enter copy mode, send input, or move the source application's viewport. Available normal-pane history is limited by tmux's retention and screen behavior. Alternate-screen applications may keep their transcript internally without putting it into tmux scrollback; scrolling that internal application history is not implemented. ACP history is limited to the published file; deleted/truncated output cannot be recovered. Loading an unusually large history can take time and memory because it is read and parsed as one snapshot.
+
+`tests/preview_smoke.py` exercises the actual TUI in a private attached tmux/PTY: ordinary and ACP history, Ctrl-u/Ctrl-d without unregistering, list registration confirmation/cancellation, wheel hit testing, PageUp/PageDown, Home/End, stable text under concurrent output, ANSI/CJK, resize, agent switching, and transcript replacement. It also checks PageUp/Home/End inside an actual popup. `tests/tmux_smoke.rs` checks history retrieval without changing the source viewport and ACP history beyond the live tail, with publisher errors shared by both read paths.
 
 ## LAN mirror
 
@@ -31,6 +47,8 @@ Development uses the SDK under `/tmp/agentmux-sdk`; the user permits this host-b
 ## Operator controls
 
 `src/control.rs` checks current agent identity and a binding derived from pane process, owner PID, transcript, published socket, kind/name, foreground command and process detection before each action. Requests carry the binding selected in the UI. A process-wide mutex serializes terminal pastes and ACP actions. This is a freshness guard, not a transaction over agent lifecycle: an agent can still exit during a tmux operation.
+
+CLI, TUI, and LAN now route this control path through the shared observer. Prompt sends to blocked agents are rejected; interrupt remains available. The instance fingerprint participates in the binding, and observer receipts support activity-correlated waits.
 
 Terminal sends use a private named tmux buffer, bracketed paste when supported, and Enter; interrupt sends Ctrl+C. Plain panes, exited agents, editors without an ACP bridge, and stale bindings are unavailable. Known shells are unavailable unless process-based agent detection still finds an agent.
 

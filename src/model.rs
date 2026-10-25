@@ -1,13 +1,14 @@
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::cmp::Ordering;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum AgentState {
     Blocked,
     Done,
     Working,
     Idle,
+    #[default]
     Unknown,
     Dead,
     Plain,
@@ -43,7 +44,7 @@ impl AgentState {
     }
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct PaneRecord {
     pub session_id: String,
     pub session_name: String,
@@ -69,6 +70,14 @@ pub struct PaneRecord {
     pub state_source: String,
     pub state_message: Option<String>,
     pub last_line: String,
+    #[serde(default)]
+    pub instance_id: String,
+    #[serde(default)]
+    pub generation: u64,
+    #[serde(default)]
+    pub state_seq: u64,
+    #[serde(default)]
+    pub completion_seq: Option<u64>,
 }
 
 impl PaneRecord {
@@ -91,7 +100,7 @@ impl PaneRecord {
     }
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SpaceSummary {
     pub session_id: String,
     pub name: String,
@@ -101,10 +110,19 @@ pub struct SpaceSummary {
     pub active_pane_id: Option<String>,
 }
 
-#[derive(Debug, Clone, Default, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ObserverInfo {
+    pub version: u32,
+    pub epoch: String,
+    pub seq: u64,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Snapshot {
     pub spaces: Vec<SpaceSummary>,
     pub panes: Vec<PaneRecord>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub observer: Option<ObserverInfo>,
 }
 
 impl Snapshot {
@@ -195,6 +213,7 @@ mod tests {
             state_source: "test".into(),
             state_message: None,
             last_line: String::new(),
+            ..Default::default()
         }
     }
 

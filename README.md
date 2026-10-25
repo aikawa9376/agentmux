@@ -10,6 +10,7 @@ tmux 上で動く複数の coding agent を、Herdr のサイドバーに近い�
 - blocked → done → working → idle → unknown の優先表示
 - session/window/pane を横断した一覧と adaptive preview
 - ANSI色・文字装飾・改行境界・cursor位置を保つvisible-screen preview
+- 通常paneのtmux履歴とACP公開ログのスクロール、履歴閲覧中の表示位置固定と末尾での自動追従復帰
 - blocked=赤、working=黄spinner、done=teal、idle=緑のHerdr式状態アイコン
 - foreground command、TTY process、argv0、Node/Python package path、pane options による agent 識別
 - 識別済みagentの画面下端による状態推定（画面本文はagent識別に不使用）
@@ -18,6 +19,9 @@ tmux 上で動く複数の coding agent を、Herdr のサイドバーに近い�
 - private PTY 上の tmux control-mode によるイベント更新
 - mouse click/wheel、keyboard navigation、狭いpopup向け単一カラム表示
 - human-readable output と `list --json`
+- tmux socketごとの共有observer、未読完了、client別既読、背景通知
+- 共通のagent送信経路、`send --wait`、`wait`、sequence付きstate events
+- `ui --popup` でtmuxのフロート表示（通常pane/window表示も利用可能）
 - TOML config。fzf、curl、util-linux `script` は不要
 
 ## Build and install
@@ -37,6 +41,16 @@ source-file ~/workspace/agentmux/contrib/agentmux.tmux
 
 - `M-a`: 右側に通常paneとしてsidebarを開く
 - `prefix a`: 通常windowとして広いdashboardを開く
+- `prefix A`: フロートpopupでdashboardを開く
+
+引数からも開けます。幅・高さは割合またはcell数です。popupは`Enter`で選択先へ移動して閉じ、`q` / `Esc`でも閉じます。paneの分割配置は変わりません。
+
+```bash
+agentmux ui --popup
+agentmux ui --popup --width 90% --height 85%
+```
+
+clientが複数あり呼び出し元を特定できない場合は`--client`とorigin paneを指定します。tmux bindingは両方を自動で渡します。
 
 設定を反映したら `tmux source-file ~/.config/tmux/tmux.conf` を実行してください。
 
@@ -46,9 +60,13 @@ tmuxの`source-file`は差分適用です。設定から削除した古いbindin
 
 | Key | Action |
 | --- | --- |
-| `Tab` | spaces / agents panel の切替 |
-| `j`, `k`, arrows | 選択移動 |
-| `Enter` | 選択した session/pane を focus（agentmuxは終了しない） |
+| `Tab` / `Shift-Tab` | spaces / agents / preview panel の切替（preview非表示時は2つ） |
+| `j`, `k`, arrows | 一覧では選択移動、previewでは1行スクロール |
+| `PageUp` / `PageDown` | previewを1ページスクロール（どのpanelからも操作可能） |
+| `Ctrl-u` / `Ctrl-d` | preview選択中、半ページ上 / 下へスクロール |
+| `Home` / `g`, `End` / `G` | preview選択中、履歴先頭 / 最新出力に戻って自動追従 |
+| マウスホイール | preview上では3行スクロール、一覧上では選択移動 |
+| `Enter` | 選択先をfocus。通常pane/windowでは継続、popupでは閉じる |
 | `a` | agent-only / all panes の切替 |
 | `r`, `Ctrl-g` | 即時 refresh |
 | `Alt-c` / `Alt-l` / `Alt-o` | Codex / Claude / OpenCode を split 起動 |
@@ -56,7 +74,8 @@ tmuxの`source-file`は差分適用です。設定から削除した古いbindin
 | `Ctrl-s` | prompt を送信 |
 | `Ctrl-r` | pane を確認付き respawn |
 | `Ctrl-k` | pane を確認付き kill |
-| `Ctrl-m` / `Ctrl-u` | agent metadata を設定 / 解除 |
+| `Ctrl-m` | agent metadata を設定 |
+| `Ctrl-u`（一覧選択中） | 確認後にagent登録を解除。`y`で確定、`Enter` / `Esc` / `n`で取消 |
 | `q`, `Esc` | sidebar を閉じる |
 
 agent-only表示はagentが0件でも通常paneへ切り替わりません。`a`で明示的にall panesへ切り替えられます。別windowへ移動した場合、agentmuxは元のwindowに残ります。
@@ -78,6 +97,9 @@ agentmux explain %25 --json
 agentmux focus reviewer
 agentmux spawn codex ~/project
 agentmux send reviewer --text "run the failing tests"
+agentmux send reviewer --text "run the failing tests" --wait --timeout 120000
+agentmux wait reviewer --until done --until blocked --timeout 120000
+agentmux events
 agentmux mark %25 --kind codex --name reviewer
 agentmux status %25 blocked "approval required"
 agentmux status %25 working "prompt sent" 15
@@ -96,6 +118,24 @@ agentmux withdraw "$TMUX_PANE" --owner lazyagent
 ```
 
 Target には `%pane_id`、`session:window.pane`、一意な agent name/kind を指定できます。曖昧な名前はエラーになります。
+
+`send`は現在のagent identityを再検証し、terminalではpaste、LazyAgent ACPでは公開元へのRPCを使います。blocked中は送信を拒否するので、実paneで内容を確認して応答してください。`send --wait`は送信後の活動を確認してからidle/done/blockedを待ち、古いidleやdoneでは完了しません。待機結果はJSONです。timeoutの単位はミリ秒。timeoutや応答喪失後は、再送前にpaneを確認してください。
+
+### Shared state and notifications
+
+CLI/UI/LANは同じobserverを自動起動して利用します。observerはUIを閉じても監視を続け、tmuxのprocessやPTYは所有しません。
+
+```bash
+agentmux daemon status
+agentmux daemon stop
+agentmux daemon start
+```
+
+workingからidleになった完了を`done`として保持します。単なるstartupや会話paneの初回idleは完了に数えません。`list`やpreviewの読み取りは既読にせず、明示的な`focus`はCLI側の既読を更新します。TUIのclient別既読は別に管理するため表示が異なる場合があります。完了seq・generation・CLI側の既読はobserver再起動をまたいで保存します。
+
+既定ではbackgroundのdone/blockedをtmuxのmessageで通知し、表示中のpaneでは抑止します。Linuxのsystem通知は`notifications.system = true`で有効にできます。監視・通知設定とlocal manifest変更はobserverのstop/start、UI設定はUIの開き直しで反映します。
+
+`events`は初回snapshotに続きNDJSONのstate eventを出力します。各eventにsequenceがあり、保持上限を超えた場合は`events_lost`、observerの再起動時は`observer_restarted`となります。再開方法とIPC protocolは[設計文書](docs/design/observer-and-popup.md)を参照してください。
 
 誤検出を調べる場合は `agentmux explain <target>` を使います。agentの識別根拠と状態判定の根拠を別々に表示します。nvimなどeditor内のintegrationは `@agent_kind` と `@agent_status` をpublishすることで検出され、通常のbuffer本文にagent名が書かれているだけでは検出されません。
 
@@ -143,9 +183,15 @@ show_plain_panes = false
 [refresh]
 preview_ms = 50
 status_ms = 250
+
+[notifications]
+tmux = true
+system = false
 ```
 
-UI全体の幅が`preview_min_width`未満ならpreviewを描画せず、spaces/agents sidebarだけを全幅表示します。previewはtmuxの現在のvisible cell gridを`capture-pane -e`で取得し、foreground/background color、太字、italic、underline、元の改行境界、cursor位置を復元します。再wrapやscrollback連結は行いません。agentmux自身は背景色を指定せず、terminalの背景を継承します。
+UI全体の幅が`preview_min_width`未満ならpreviewを描画せず、spaces/agents sidebarだけを全幅表示します。通常のlive previewはtmuxの現在のvisible cell gridを`capture-pane -e`で取得し、foreground/background color、太字、italic、underline、元の改行境界、cursor位置を復元します。再wrapは行いません。agentmux自身は背景色を指定せず、tmuxのpaneまたはpopupの背景を継承します。
+
+上へスクロールすると、通常paneはtmuxに残っている履歴、ACPは公開ログ全体をその時点で読み込みます。`history`表示中はその内容を固定し、新しい出力でも読んでいる場所を動かしません。末尾まで下へスクロールするか、previewで`End` / `G`を押すと最新出力への追従を再開します。agentや公開ログの切替時もliveへ戻ります。履歴の読み取りは対象paneの表示位置や入力を変更しません。tmuxが保持しない全画面アプリ内部の履歴や、既に削除されたログは取得できません。
 
 非表示のpreviewは取得しません。状態は出力イベントで更新し、無出力時も `max(status_ms, 2000)` ミリ秒間隔で再確認するため、pane optionの変更・TTL期限切れ・watcher停止からも追従します。
 
@@ -153,10 +199,14 @@ UI全体の幅が`preview_min_width`未満ならpreviewを描画せず、spaces/
 
 ## Current boundary
 
-このバージョンは「tmuxで使えるHerdr風サイドバー」の基礎です。Herdr v0.9.0時点の21個のagent別manifestで画面状態を判定します（Maki・Muse・Qwen対応）。OSC progressはtmuxから取得できないため判定対象外です。永続daemon、`done = idle + unseen`、通知、worktree、pluginは次のphaseです。LAN向けのthin clientは `android/` と `web/` に実装しています。tmux自身が提供するPTY、session永続化、layout、copy-modeは再実装しません。
+Herdr v0.9.5を基準とする22個のagent別manifestで画面状態を判定します。Copilotのfolder trustとCodex旧timer区切りへの互換拡張を維持しています。local overrideは`~/.config/agentmux/agent-detection/<kind>.toml`（`XDG_CONFIG_HOME`対応）。不正なoverrideはbundledへfallbackし、`explain`がsource/version・各ruleの一致・regionと警告を表示します。OSC progressの入力は未取得です。
+
+対象は検出・共有監視・未読完了・通知・agent操作です。Git/worktree管理と複数SSHマシン集約は対象外とし、既存のGit・SSH/tmux workflowを利用します。tmux自身が提供するPTY、session永続化、layout、copy-modeもtmuxに任せます。LAN向けのthin clientは `android/` と `web/` に実装しています。
 
 設計・調査文書:
 
+- [共有監視・送信待機・popupの設計](docs/design/observer-and-popup.md)
+- [2026-10-25 本家v0.9.5追従調査・優先順位](docs/research/herdr-v0.9.5.md)
 - [2026-09-08 本家追従・性能調査](docs/research/herdr-v0.9.0.md)
 - [Herdr 機能調査](docs/research/herdr-v0.7.3.md)
 - [機能 parity matrix](docs/parity-matrix.md)

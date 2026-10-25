@@ -15,7 +15,7 @@ pub struct Controls {
     pub mode: &'static str,
 }
 
-#[derive(Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Request {
     pub pane: String,
@@ -25,7 +25,7 @@ pub struct Request {
     pub text: String,
 }
 
-#[derive(Deserialize, Serialize, PartialEq)]
+#[derive(Debug, Deserialize, Serialize, PartialEq)]
 #[serde(rename_all = "lowercase")]
 pub enum Action {
     Send,
@@ -48,6 +48,7 @@ fn describe(pane: &PaneRecord, fields: &[String]) -> Controls {
     pane.agent_name.hash(&mut hasher);
     pane.command.hash(&mut hasher);
     pane.process_agent.hash(&mut hasher);
+    pane.instance_id.hash(&mut hasher);
     let owner = fields.get(1).map(String::as_str).unwrap_or("");
     let mode = if owner == "lazyagent" {
         "acp"
@@ -81,6 +82,10 @@ pub fn capabilities(tmux: &Tmux, pane: &PaneRecord) -> Result<Controls> {
 }
 
 pub fn execute(tmux: &Tmux, request: Request) -> Result<()> {
+    if let Some(path) = tmux.observer_socket() {
+        crate::observer::action(path, request)?;
+        return Ok(());
+    }
     static ACTION_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
     let _guard = ACTION_LOCK
         .lock()
@@ -99,6 +104,9 @@ pub fn execute(tmux: &Tmux, request: Request) -> Result<()> {
     let Some(pane) = snapshot.pane(&request.pane) else {
         bail!("agent unavailable");
     };
+    if request.action == Action::Send && pane.state == crate::model::AgentState::Blocked {
+        bail!("agent is blocked; inspect the pane and respond there");
+    }
     let fields = metadata(tmux, &request.pane)?;
     let controls = describe(pane, &fields);
     if !controls.available || controls.binding != request.binding {

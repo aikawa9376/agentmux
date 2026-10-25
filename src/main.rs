@@ -29,6 +29,28 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Commands {
+    /// Manage the shared, tmux-server-scoped state observer.
+    Daemon {
+        #[command(subcommand)]
+        command: DaemonCommands,
+    },
+    /// Wait for the current agent to reach a state (JSON result).
+    Wait {
+        target: String,
+        #[arg(long, value_parser = parse_state)]
+        until: Vec<agentmux::model::AgentState>,
+        #[arg(long, default_value_t = 30000, value_parser = clap::value_parser!(u64).range(1..))]
+        timeout: u64,
+    },
+    /// Stream state events as NDJSON; starts with a snapshot by default.
+    Events {
+        #[arg(long, requires = "epoch")]
+        since: Option<u64>,
+        #[arg(long, requires = "since")]
+        epoch: Option<String>,
+        #[arg(long)]
+        once: bool,
+    },
     /// Serve a token-protected LAN mirror with send and interrupt controls.
     Serve {
         #[arg(long, default_value = "127.0.0.1:9876")]
@@ -48,6 +70,15 @@ enum Commands {
         origin: Option<String>,
         #[arg(long)]
         client: Option<String>,
+        /// Open in a floating tmux popup; Enter focuses the target and closes it.
+        #[arg(long)]
+        popup: bool,
+        #[arg(long, default_value = "80%", value_parser = agentmux::popup::dimension)]
+        width: String,
+        #[arg(long, default_value = "80%", value_parser = agentmux::popup::dimension)]
+        height: String,
+        #[arg(long, hide = true)]
+        popup_child: bool,
     },
     /// List tmux panes and inferred agent state.
     List {
@@ -86,11 +117,20 @@ enum Commands {
         #[arg(long)]
         client: Option<String>,
     },
-    /// Send one prompt line and Enter to a pane.
+    /// Submit a prompt to a current agent, optionally waiting for it.
     Send {
         target: String,
         #[arg(long)]
         text: Option<String>,
+        /// Wait for activity and then a settled state after sending.
+        #[arg(long)]
+        wait: bool,
+        #[arg(long, requires = "wait", value_parser = parse_state)]
+        until: Vec<agentmux::model::AgentState>,
+        #[arg(long, default_value_t = 30000, value_parser = clap::value_parser!(u64).range(1..))]
+        timeout: u64,
+        #[arg(long)]
+        json: bool,
     },
     /// Mark an existing pane as an agent.
     Mark {
@@ -142,17 +182,72 @@ enum Commands {
     },
 }
 
+#[derive(Debug, Subcommand)]
+enum DaemonCommands {
+    Start,
+    Status,
+    Stop,
+    #[command(hide = true)]
+    Run,
+}
+
 fn main() -> Result<()> {
     let cli = Cli::parse();
     if cli.default_config {
         print!("{}", LoadedConfig::default_toml());
         return Ok(());
     }
-    let tmux = Tmux::new(cli.socket_name);
-    match cli.command.unwrap_or(Commands::Ui {
+    let mut tmux = Tmux::new(cli.socket_name);
+    let command = cli.command.unwrap_or(Commands::Ui {
         origin: None,
         client: None,
-    }) {
+        popup: false,
+        width: "80%".into(),
+        height: "80%".into(),
+        popup_child: false,
+    });
+    if let Commands::Daemon { command } = command {
+        use agentmux::observer::{self, Request};
+        match command {
+            DaemonCommands::Run => observer::run(tmux)?,
+            DaemonCommands::Start => {
+                let path = observer::ensure_running(&mut tmux)?;
+                println!("{}", path.display());
+            }
+            DaemonCommands::Status => {
+                let path = observer::endpoint(&tmux)?;
+                let status: serde_json::Value = observer::call(&path, &Request::Status)?;
+                println!("{status}");
+            }
+            DaemonCommands::Stop => {
+                let path = observer::endpoint(&tmux)?;
+                observer::call::<()>(&path, &Request::Stop)?;
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+                while path.exists() {
+                    anyhow::ensure!(
+                        std::time::Instant::now() < deadline,
+                        "observer is still stopping"
+                    );
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
+            }
+        }
+        return Ok(());
+    }
+    agentmux::observer::ensure_running(&mut tmux)?;
+    let should_refresh = matches!(
+        &command,
+        Commands::Mark { .. }
+            | Commands::Unmark { .. }
+            | Commands::Respawn { .. }
+            | Commands::Status { .. }
+            | Commands::ClearStatus { .. }
+            | Commands::Publish { .. }
+            | Commands::Withdraw { .. }
+            | Commands::Spawn { .. }
+    );
+    match command {
+        Commands::Daemon { .. } => unreachable!(),
         Commands::Serve {
             bind,
             token_file,
@@ -160,15 +255,42 @@ fn main() -> Result<()> {
             qr_svg,
         } => {
             agentmux::remote::serve(
-                tmux,
+                tmux.clone(),
                 bind,
                 token_file.as_deref(),
                 advertise_address,
                 qr_svg.as_deref(),
             )?;
         }
-        Commands::Ui { origin, client } => {
-            tui::run(tmux, origin, client, LoadedConfig::load())?;
+        Commands::Ui {
+            origin,
+            client,
+            popup,
+            width,
+            height,
+            popup_child,
+        } => {
+            if popup {
+                agentmux::popup::open(&tmux, origin, client, &width, &height)?;
+            } else {
+                let client = client.or(tmux.caller_client(origin.as_deref())?);
+                let _overlay = if popup_child {
+                    client
+                        .as_deref()
+                        .map(|client| {
+                            agentmux::observer::OverlayGuard::register(
+                                tmux.observer_socket().unwrap(),
+                                client,
+                            )
+                        })
+                        .transpose()?
+                } else {
+                    None
+                };
+                tmux.set_viewer(client.clone());
+                tui::run(tmux, origin, client, LoadedConfig::load(), popup_child)?;
+                return Ok(());
+            }
         }
         Commands::List { origin: _, json } => {
             let snapshot = tmux.snapshot()?;
@@ -196,7 +318,13 @@ fn main() -> Result<()> {
         }
         Commands::Explain { target, json } => {
             let pane = tmux.resolve_pane(&target)?;
-            let explanation = DetectionExplanation::from(&pane);
+            let mut explanation = DetectionExplanation::from(&pane);
+            explanation.manifest = agentmux::observer::call(
+                tmux.observer_socket().unwrap(),
+                &agentmux::observer::Request::Explain {
+                    pane: pane.pane_id.clone(),
+                },
+            )?;
             if json {
                 println!("{}", serde_json::to_string_pretty(&explanation)?);
             } else {
@@ -218,6 +346,12 @@ fn main() -> Result<()> {
                 println!("state source:    {}", pane.state_source);
                 println!("screen checked:  {}", pane.screen_checked);
                 println!("note:            {}", explanation.note);
+                if let Some(manifest) = &explanation.manifest {
+                    println!(
+                        "manifest:        {}",
+                        serde_json::to_string_pretty(manifest)?
+                    );
+                }
             }
         }
         Commands::Focus { target, client } => {
@@ -262,7 +396,15 @@ fn main() -> Result<()> {
             )?;
             println!("{pane}");
         }
-        Commands::Send { target, text } => {
+        Commands::Send {
+            target,
+            text,
+            wait,
+            until,
+            timeout,
+            json,
+        } => {
+            let submitted_at = std::time::Instant::now();
             let pane = tmux.resolve_pane(&target)?;
             let text = match text {
                 Some(text) => text,
@@ -271,8 +413,74 @@ fn main() -> Result<()> {
             if text.is_empty() {
                 bail!("prompt must not be empty");
             }
-            tmux.send_text(&pane.pane_id, &text, true)?;
-            tmux.set_status(&pane.pane_id, "working", Some("prompt sent"), 15)?;
+            let info = agentmux::control::capabilities(&tmux, &pane)?;
+            let receipt = agentmux::observer::action(
+                tmux.observer_socket().unwrap(),
+                agentmux::control::Request {
+                    pane: pane.pane_id.clone(),
+                    binding: info.binding,
+                    action: agentmux::control::Action::Send,
+                    text,
+                },
+            )?;
+            if wait {
+                let states = settled_states(until);
+                let result = agentmux::observer::wait(
+                    &tmux,
+                    &pane.pane_id,
+                    &states,
+                    std::time::Duration::from_millis(timeout)
+                        .saturating_sub(submitted_at.elapsed()),
+                    Some(&receipt),
+                )?;
+                println!("{}", serde_json::to_string(&result)?);
+            } else if json {
+                println!("{}", serde_json::to_string(&receipt)?);
+            }
+        }
+        Commands::Wait {
+            target,
+            until,
+            timeout,
+        } => {
+            let result = agentmux::observer::wait(
+                &tmux,
+                &target,
+                &settled_states(until),
+                std::time::Duration::from_millis(timeout),
+                None,
+            )?;
+            println!("{}", serde_json::to_string(&result)?);
+        }
+        Commands::Events { since, epoch, once } => {
+            let snapshot = tmux.snapshot()?;
+            let info = snapshot.observer.as_ref().unwrap();
+            let mut seq = since.unwrap_or(info.seq);
+            let epoch = epoch.unwrap_or_else(|| info.epoch.clone());
+            if since.is_none() {
+                println!(
+                    "{}",
+                    serde_json::json!({"type":"snapshot", "snapshot":snapshot})
+                );
+            }
+            loop {
+                let events: Vec<agentmux::observer::Event> = agentmux::observer::call(
+                    tmux.observer_socket().unwrap(),
+                    &agentmux::observer::Request::Events {
+                        epoch: epoch.clone(),
+                        since: seq,
+                    },
+                )?;
+                for event in events {
+                    seq = event.seq;
+                    println!("{}", serde_json::to_string(&event)?);
+                }
+                std::io::stdout().flush()?;
+                if once {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
         }
         Commands::Mark {
             target,
@@ -340,6 +548,11 @@ fn main() -> Result<()> {
             tmux.withdraw_agent(&target, &owner)?;
         }
     }
+    if should_refresh {
+        if let Some(path) = tmux.observer_socket() {
+            agentmux::observer::refresh(path)?;
+        }
+    }
     Ok(())
 }
 
@@ -356,6 +569,7 @@ struct DetectionExplanation<'a> {
     state_source: &'a str,
     screen_checked: bool,
     note: &'static str,
+    manifest: Option<serde_json::Value>,
 }
 
 impl<'a> From<&'a agentmux::model::PaneRecord> for DetectionExplanation<'a> {
@@ -379,7 +593,25 @@ impl<'a> From<&'a agentmux::model::PaneRecord> for DetectionExplanation<'a> {
             state_source: &pane.state_source,
             screen_checked: pane.screen_checked,
             note,
+            manifest: None,
         }
+    }
+}
+
+fn parse_state(value: &str) -> std::result::Result<agentmux::model::AgentState, String> {
+    agentmux::detect::normalize_status(value)
+        .ok_or_else(|| "use idle, done, blocked, working, unknown, or dead".into())
+}
+
+fn settled_states(states: Vec<agentmux::model::AgentState>) -> Vec<agentmux::model::AgentState> {
+    if states.is_empty() {
+        vec![
+            agentmux::model::AgentState::Idle,
+            agentmux::model::AgentState::Done,
+            agentmux::model::AgentState::Blocked,
+        ]
+    } else {
+        states
     }
 }
 

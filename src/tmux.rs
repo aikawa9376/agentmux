@@ -10,6 +10,8 @@ use std::{
     collections::HashMap,
     fs::File,
     io::{Read, Seek, SeekFrom},
+    os::{fd::AsRawFd, unix::fs::OpenOptionsExt},
+    path::PathBuf,
     process::{Command, Output},
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -22,12 +24,14 @@ const PANE_FORMAT: &str = concat!(
     "#{window_active}\x1f#{pane_active}\x1f#{@agent_name}\x1f#{@agent_kind}\x1f",
     "#{@agent_command}\x1f#{@agent_created_at}\x1f#{@agent_status}\x1f",
     "#{@agent_status_at}\x1f#{@agent_status_ttl}\x1f#{@agent_status_message}\x1f",
-    "#{@agent_status_pid}\x1f#{@agent_status_owner}"
+    "#{@agent_status_pid}\x1f#{@agent_status_owner}\x1f#{pane_pid}\x1f#{@agent_preview_path}"
 );
 
 #[derive(Debug, Clone, Default)]
 pub struct Tmux {
     socket_name: Option<String>,
+    observer_socket: Option<PathBuf>,
+    viewer: Option<String>,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -52,7 +56,10 @@ pub struct PublishedAgent<'a> {
 
 impl Tmux {
     pub fn new(socket_name: Option<String>) -> Self {
-        Self { socket_name }
+        Self {
+            socket_name,
+            ..Default::default()
+        }
     }
 
     pub fn socket_name(&self) -> Option<&str> {
@@ -60,6 +67,51 @@ impl Tmux {
     }
 
     pub fn snapshot(&self) -> Result<Snapshot> {
+        if let Some(path) = &self.observer_socket {
+            return crate::observer::snapshot(path, self.viewer.as_deref());
+        }
+        self.raw_snapshot()
+    }
+
+    pub fn observer_socket(&self) -> Option<&std::path::Path> {
+        self.observer_socket.as_deref()
+    }
+
+    pub fn use_observer(&mut self, path: PathBuf) {
+        self.observer_socket = Some(path);
+    }
+
+    pub fn set_viewer(&mut self, viewer: Option<String>) {
+        self.viewer = viewer;
+    }
+
+    pub fn caller_client(&self, origin: Option<&str>) -> Result<Option<String>> {
+        let output = self.run([
+            "list-clients",
+            "-F",
+            "#{client_name}\x1f#{pane_id}\x1f#{client_control_mode}",
+        ])?;
+        let clients: Vec<_> = output
+            .lines()
+            .filter_map(|line| {
+                let fields: Vec<_> = line.split('\x1f').collect();
+                (fields.len() == 3 && fields[2] == "0").then(|| (fields[0], fields[1]))
+            })
+            .collect();
+        let matching: Vec<_> = clients
+            .iter()
+            .filter(|(_, pane)| Some(*pane) == origin)
+            .collect();
+        Ok(if matching.len() == 1 {
+            Some(matching[0].0.into())
+        } else if clients.len() == 1 {
+            Some(clients[0].0.into())
+        } else {
+            None
+        })
+    }
+
+    pub fn raw_snapshot(&self) -> Result<Snapshot> {
         let process_map = process_map();
         let output = self.run(["list-panes", "-a", "-F", PANE_FORMAT])?;
         let now = SystemTime::now()
@@ -70,11 +122,18 @@ impl Tmux {
 
         for line in output.lines().filter(|line| !line.is_empty()) {
             let fields: Vec<_> = line.split(SEP).collect();
-            if fields.len() != 24 {
+            if fields.len() != 26 {
                 continue;
             }
             let tty = fields[10].to_owned();
             let processes = process_map.get(&tty).map(Vec::as_slice).unwrap_or_default();
+            let foreground = foreground_group(&tty, processes).map(|group| group.to_string());
+            let foreground_processes: Vec<_> = processes
+                .iter()
+                .filter(|p| foreground.as_ref().is_none_or(|group| p.group == *group))
+                .cloned()
+                .collect();
+            let processes = foreground_processes.as_slice();
             let status_pid = fields[22].parse::<i32>().ok();
             let owned_metadata_stale = !fields[23].is_empty()
                 && status_pid.is_some_and(|pid| pid > 0 && !process_alive(pid));
@@ -161,16 +220,48 @@ impl Tmux {
                 } else {
                     last_line(&screen)
                 },
+                instance_id: if !owned_metadata_stale && !fields[23].is_empty() {
+                    format!(
+                        "{}:owner:{}:{}:{}",
+                        fields[24], fields[22], fields[23], fields[25]
+                    )
+                } else {
+                    // An agent's foreground group stays stable while its tool/helper PIDs change.
+                    let identity = foreground
+                        .or_else(|| {
+                            processes
+                                .iter()
+                                .find(|p| {
+                                    detect_agent_process(&p.command, std::slice::from_ref(p))
+                                        .is_some()
+                                })
+                                .map(|p| p.pid.clone())
+                        })
+                        .unwrap_or_default();
+                    format!("{}:foreground:{identity}", fields[24])
+                },
+                generation: 0,
+                state_seq: 0,
+                completion_seq: None,
             };
             panes.push(pane);
         }
 
         Snapshot::sort_panes(&mut panes);
         let spaces = Snapshot::build_spaces(&panes);
-        Ok(Snapshot { spaces, panes })
+        Ok(Snapshot {
+            spaces,
+            panes,
+            observer: None,
+        })
     }
 
     pub fn resolve_pane(&self, target: &str) -> Result<PaneRecord> {
+        // Operations need current identity even when topology changed since the
+        // observer's last scheduled scan; ordinary list reads stay cached.
+        if let Some(path) = &self.observer_socket {
+            crate::observer::refresh(path)?;
+        }
         let snapshot = self.snapshot()?;
         let mut matches: Vec<_> = snapshot
             .panes
@@ -207,6 +298,15 @@ impl Tmux {
     }
 
     pub fn pane_view(&self, pane: &str) -> Result<PaneView> {
+        self.read_pane_view(pane, false)
+    }
+
+    /// Capture retained history on demand, without changing the target's viewport.
+    pub fn pane_history(&self, pane: &str) -> Result<String> {
+        Ok(self.read_pane_view(pane, true)?.ansi)
+    }
+
+    fn read_pane_view(&self, pane: &str, history: bool) -> Result<PaneView> {
         let metadata = self.run([
             "display-message",
             "-p",
@@ -230,7 +330,7 @@ impl Tmux {
             if fields[4].is_empty() {
                 bail!("Published preview unavailable: waiting for transcript");
             }
-            let text = read_preview_tail(fields[4])?;
+            let text = read_preview(fields[4], history)?;
             let content_height = text.lines().count().clamp(1, u16::MAX as usize) as u16;
             return Ok(PaneView {
                 ansi: colorize_acp_transcript(&text),
@@ -241,7 +341,11 @@ impl Tmux {
             });
         }
         Ok(PaneView {
-            ansi: self.run(["capture-pane", "-ep", "-t", pane])?,
+            ansi: if history {
+                self.run(["capture-pane", "-ep", "-t", pane, "-S", "-"])?
+            } else {
+                self.run(["capture-pane", "-ep", "-t", pane])?
+            },
             width,
             height,
             cursor_x: fields[2].parse().context("invalid cursor x")?,
@@ -269,6 +373,9 @@ impl Tmux {
         self.run(args)?;
         self.run(["select-window", "-t", window_id])?;
         self.run(["select-pane", "-t", pane])?;
+        if let Some(path) = &self.observer_socket {
+            crate::observer::mark_seen(path, pane, client)?;
+        }
         Ok(())
     }
 
@@ -554,7 +661,7 @@ impl Tmux {
         command
     }
 
-    fn run<I, S>(&self, args: I) -> Result<String>
+    pub(crate) fn run<I, S>(&self, args: I) -> Result<String>
     where
         I: IntoIterator<Item = S>,
         S: AsRef<std::ffi::OsStr>,
@@ -585,14 +692,19 @@ fn nonempty(value: &str) -> Option<String> {
     (!value.is_empty()).then(|| value.to_owned())
 }
 
-fn read_preview_tail(path: &str) -> Result<String> {
+fn read_preview(path: &str, history: bool) -> Result<String> {
     const MAX_BYTES: u64 = 256 * 1024;
     let mut file = File::open(path).context("failed to open published preview")?;
     let length = file.metadata()?.len();
-    let start = length.saturating_sub(MAX_BYTES);
+    let start = if history {
+        0
+    } else {
+        length.saturating_sub(MAX_BYTES)
+    };
     file.seek(SeekFrom::Start(start))?;
     let mut bytes = Vec::with_capacity((length - start) as usize);
-    file.read_to_end(&mut bytes)?;
+    // Do not chase a transcript that keeps growing while it is being read.
+    file.take(length - start).read_to_end(&mut bytes)?;
     if start > 0 {
         if let Some(newline) = bytes.iter().position(|byte| *byte == b'\n') {
             bytes.drain(..=newline);
@@ -673,7 +785,7 @@ fn explicit_status_is_fresh(now: u64, changed_at: u64, ttl: u64, owner_pid: Opti
     ttl == 0 || changed_at == 0 || now.saturating_sub(changed_at) <= ttl
 }
 
-fn process_alive(pid: i32) -> bool {
+pub(crate) fn process_alive(pid: i32) -> bool {
     // SAFETY: kill(pid, 0) performs existence/permission checking and sends no signal.
     unsafe {
         libc::kill(pid, 0) == 0
@@ -681,8 +793,10 @@ fn process_alive(pid: i32) -> bool {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 struct ProcessInfo {
+    pid: String,
+    group: String,
     command: String,
     args: String,
 }
@@ -736,9 +850,37 @@ fn detect_wrapped_agent(args: &str) -> Option<String> {
     detect_agent_executable(candidate).or_else(|| detect_agent_command(candidate))
 }
 
+fn foreground_group(tty: &str, processes: &[ProcessInfo]) -> Option<i32> {
+    // A detached observer does not own the pane's controlling terminal, so
+    // tcgetpgrp may return ENOTTY. Linux exposes the same group in proc stat.
+    #[cfg(target_os = "linux")]
+    for process in processes {
+        if let Ok(stat) = std::fs::read_to_string(format!("/proc/{}/stat", process.pid)) {
+            if let Some(group) = stat
+                .rsplit_once(')')
+                .and_then(|(_, fields)| fields.split_whitespace().nth(5))
+                .and_then(|value| value.parse::<i32>().ok())
+                .filter(|group| *group > 0)
+            {
+                return Some(group);
+            }
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
+    let _ = processes;
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOCTTY | libc::O_NONBLOCK)
+        .open(tty)
+        .ok()?;
+    // TIOCGPGRP only reads the terminal's foreground process group.
+    let group = unsafe { libc::tcgetpgrp(file.as_raw_fd()) };
+    (group > 0).then_some(group)
+}
+
 fn process_map() -> HashMap<String, Vec<ProcessInfo>> {
     let Ok(output) = Command::new("ps")
-        .args(["-eo", "tty=,comm=,args="])
+        .args(["-eo", "tty=,pid=,pgid=,comm=,args="])
         .output()
     else {
         return HashMap::new();
@@ -746,7 +888,9 @@ fn process_map() -> HashMap<String, Vec<ProcessInfo>> {
     let mut map = HashMap::<String, Vec<ProcessInfo>>::new();
     for line in String::from_utf8_lossy(&output.stdout).lines() {
         let mut fields = line.split_whitespace();
-        let (Some(tty), Some(command)) = (fields.next(), fields.next()) else {
+        let (Some(tty), Some(pid), Some(group), Some(command)) =
+            (fields.next(), fields.next(), fields.next(), fields.next())
+        else {
             continue;
         };
         if tty == "?" {
@@ -756,6 +900,8 @@ fn process_map() -> HashMap<String, Vec<ProcessInfo>> {
         map.entry(format!("/dev/{tty}"))
             .or_default()
             .push(ProcessInfo {
+                pid: pid.to_owned(),
+                group: group.to_owned(),
                 command: command.to_owned(),
                 args,
             });
@@ -777,6 +923,8 @@ mod tests {
     #[test]
     fn editor_arguments_are_not_agent_evidence() {
         let processes = vec![ProcessInfo {
+            pid: "test".into(),
+            group: "test".into(),
             command: "nvim".into(),
             args: "nvim notes-about-codex.md".into(),
         }];
@@ -786,6 +934,8 @@ mod tests {
     #[test]
     fn runtime_wrapped_agents_are_detected() {
         let processes = vec![ProcessInfo {
+            pid: "test".into(),
+            group: "test".into(),
             command: "node".into(),
             args: "node /opt/codex/bin/codex".into(),
         }];
@@ -798,6 +948,8 @@ mod tests {
     #[test]
     fn runtime_arguments_are_not_scanned_as_processes() {
         let processes = vec![ProcessInfo {
+            pid: "test".into(),
+            group: "test".into(),
             command: "node".into(),
             args: "node /opt/language-server/server.js notes-about-codex.md".into(),
         }];
@@ -807,6 +959,8 @@ mod tests {
     #[test]
     fn copilot_native_process_is_detected_from_argv_zero() {
         let processes = vec![ProcessInfo {
+            pid: "test".into(),
+            group: "test".into(),
             command: "MainThread".into(),
             args: "/usr/lib/node_modules/@github/copilot/node_modules/@github/copilot-linux-x64/copilot".into(),
         }];
@@ -819,6 +973,8 @@ mod tests {
     #[test]
     fn renamed_node_thread_detects_copilot_loader() {
         let processes = vec![ProcessInfo {
+            pid: "test".into(),
+            group: "test".into(),
             command: "node-MainThread".into(),
             args: "node /usr/bin/copilot".into(),
         }];
@@ -846,6 +1002,8 @@ mod tests {
         ];
         for (args, expected) in fixtures {
             let processes = vec![ProcessInfo {
+                pid: "test".into(),
+                group: "test".into(),
                 command: "node".into(),
                 args: args.into(),
             }];
