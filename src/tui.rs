@@ -33,17 +33,19 @@ use std::{
 };
 use unicode_width::UnicodeWidthStr;
 
-// Catppuccin Mocha accents, while the background stays terminal-native.
-const SURFACE_DIM: Color = Color::Rgb(30, 30, 46);
-const OVERLAY0: Color = Color::Rgb(108, 112, 134);
-const TEXT: Color = Color::Rgb(205, 214, 244);
-const SUBTEXT1: Color = Color::Rgb(186, 194, 222);
-const SUBTEXT0: Color = Color::Rgb(166, 173, 200);
-const ACCENT: Color = Color::Rgb(137, 180, 250);
-const GREEN: Color = Color::Rgb(166, 227, 161);
-const YELLOW: Color = Color::Rgb(249, 226, 175);
-const RED: Color = Color::Rgb(243, 139, 168);
-const TEAL: Color = Color::Rgb(148, 226, 213);
+// Solarized accents, while the background stays terminal-native.
+const SURFACE_DIM: Color = Color::Rgb(7, 54, 66);
+const OVERLAY0: Color = Color::Rgb(88, 110, 117);
+const TEXT: Color = Color::Rgb(147, 161, 161);
+const SUBTEXT1: Color = Color::Rgb(131, 148, 150);
+const SUBTEXT0: Color = Color::Rgb(101, 123, 131);
+const ACCENT: Color = Color::Rgb(38, 139, 210);
+const GREEN: Color = Color::Rgb(133, 153, 0);
+const YELLOW: Color = Color::Rgb(181, 137, 0);
+const RED: Color = Color::Rgb(220, 50, 47);
+const CYAN: Color = Color::Rgb(42, 161, 152);
+const VIOLET: Color = Color::Rgb(108, 113, 196);
+const AGENT_ROW_HEIGHT: u16 = 3;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum FocusPanel {
@@ -952,14 +954,8 @@ impl App {
         self.animation_frame = self.animation_frame.wrapping_add(1);
         self.space_rows.clear();
         self.agent_rows.clear();
-        let details = self.selected_details();
-        let width = usize::from(frame.area().width.max(1));
-        let detail_height = details
-            .iter()
-            .map(|line| UnicodeWidthStr::width(line.as_str()).max(1).div_ceil(width))
-            .sum::<usize>()
-            .min(6)
-            .min(usize::from(frame.area().height / 3)) as u16;
+        let details = self.selected_details(usize::from(frame.area().width));
+        let detail_height = u16::from(self.selected().is_some());
         let outer = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
@@ -996,9 +992,7 @@ impl App {
         self.render_spaces(frame, sidebar[0]);
         self.render_agents(frame, sidebar[1]);
         frame.render_widget(
-            Paragraph::new(details.join("\n"))
-                .style(Style::default().fg(SUBTEXT0))
-                .wrap(Wrap { trim: false }),
+            Paragraph::new(details).style(Style::default().fg(SUBTEXT0)),
             outer[1],
         );
         self.render_footer(frame, outer[2]);
@@ -1094,26 +1088,21 @@ impl App {
                     name
                 };
                 let available = usize::from(area.width.saturating_sub(4));
-                let primary =
+                let mut primary =
                     project_label(&name, project.and_then(|p| p.branch.as_deref()), available);
-                let secondary = agent_label(pane, available);
-                ListItem::new(vec![
-                    Line::from(vec![
+                primary.spans.splice(
+                    0..0,
+                    [
                         Span::raw(" "),
                         Span::styled(
                             format!("{} ", state_icon(pane.state, self.animation_frame)),
                             state,
                         ),
-                        Span::styled(
-                            primary,
-                            Style::default().fg(SUBTEXT0).add_modifier(Modifier::BOLD),
-                        ),
-                    ]),
-                    Line::from(vec![
-                        Span::raw("   "),
-                        Span::styled(secondary, Style::default().fg(SUBTEXT1)),
-                    ]),
-                ])
+                    ],
+                );
+                let mut secondary = agent_label(pane, available);
+                secondary.spans.insert(0, Span::raw("   "));
+                ListItem::new(vec![primary, secondary, Line::default()])
             })
             .collect();
         if area.height > 0 {
@@ -1170,34 +1159,49 @@ impl App {
                     inner.x,
                     row,
                     inner.width,
-                    2.min(inner.y.saturating_add(inner.height).saturating_sub(row)),
+                    AGENT_ROW_HEIGHT.min(inner.y.saturating_add(inner.height).saturating_sub(row)),
                 ),
                 self.snapshot.panes[index].pane_id.clone(),
             ));
-            row = row.saturating_add(2);
+            row = row.saturating_add(AGENT_ROW_HEIGHT);
         }
     }
 
-    fn selected_details(&self) -> Vec<String> {
+    fn selected_details(&self, width: usize) -> String {
         let Some(pane) = self.selected() else {
-            return Vec::new();
+            return String::new();
         };
         let root = self
             .projects
             .get(&pane.cwd)
             .map(|project| project.root.as_str())
             .unwrap_or("—");
-        vec![
-            format!(" root  {}", clean_label(root)),
-            format!(" cwd   {}", clean_label(&pane.cwd)),
-            format!(
-                " tmux  {} · {} · {} · {}",
-                clean_label(&pane.location()),
-                clean_label(&pane.window_name),
-                pane.pane_id,
-                pane.state.label()
+        let root = clean_label(root);
+        let cwd = clean_label(&pane.cwd);
+        let location = format!(
+            "{} · {} · {} · {}",
+            clean_label(&pane.location()),
+            clean_label(&pane.window_name),
+            pane.pane_id,
+            pane.state.label()
+        );
+        // Labels and separators take 25 cells. Share the rest, returning any
+        // unused path budget to its neighbor before abbreviating from the left.
+        let available = width.saturating_sub(25);
+        let location_width = UnicodeWidthStr::width(location.as_str()).min(available / 3);
+        let path_width = available - location_width;
+        let root_width = UnicodeWidthStr::width(root.as_str()).min(path_width / 2);
+        let cwd_width = UnicodeWidthStr::width(cwd.as_str()).min(path_width - root_width);
+        let root_width = path_width - cwd_width;
+        truncate(
+            &format!(
+                " root  {} · cwd   {} · tmux  {}",
+                compact_path(&root, root_width),
+                compact_path(&cwd, cwd_width),
+                truncate(&location, location_width)
             ),
-        ]
+            width,
+        )
     }
 
     fn render_preview(&self, frame: &mut Frame<'_>, area: Rect) {
@@ -1343,7 +1347,7 @@ impl App {
                         .title(title)
                         .borders(Borders::ALL)
                         .border_type(BorderType::Rounded)
-                        .border_style(Style::default().fg(Color::Rgb(38, 198, 218))),
+                        .border_style(Style::default().fg(ACCENT)),
                 )
                 .wrap(Wrap { trim: false }),
             area,
@@ -1367,7 +1371,7 @@ impl App {
                     .title(" confirm ")
                     .borders(Borders::ALL)
                     .border_type(BorderType::Rounded)
-                    .border_style(Style::default().fg(Color::Rgb(255, 112, 67))),
+                    .border_style(Style::default().fg(YELLOW)),
             ),
             area,
         );
@@ -1421,7 +1425,7 @@ fn state_dot(state: AgentState) -> &'static str {
 fn state_style(state: AgentState) -> Style {
     let color = match state {
         AgentState::Blocked => RED,
-        AgentState::Done => TEAL,
+        AgentState::Done => CYAN,
         AgentState::Working => YELLOW,
         AgentState::Idle => GREEN,
         AgentState::Unknown | AgentState::Dead | AgentState::Plain => OVERLAY0,
@@ -1516,30 +1520,74 @@ fn clean_label(value: &str) -> String {
         .to_owned()
 }
 
-fn project_label(name: &str, branch: Option<&str>, width: usize) -> String {
-    let Some(branch) = branch.map(clean_label).filter(|branch| !branch.is_empty()) else {
-        return truncate(name, width);
+fn compact_path(path: &str, width: usize) -> String {
+    if UnicodeWidthStr::width(path) <= width {
+        return path.to_owned();
+    }
+    if width <= 1 {
+        return "…".chars().take(width).collect();
+    }
+    let mut used = 1;
+    let mut suffix = Vec::new();
+    for ch in path.chars().rev() {
+        let cells = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
+        if used + cells > width {
+            break;
+        }
+        suffix.push(ch);
+        used += cells;
+    }
+    let suffix: String = suffix.into_iter().rev().collect();
+    let suffix = suffix
+        .find('/')
+        .map(|start| &suffix[start..])
+        .unwrap_or(&suffix);
+    format!("…{suffix}")
+}
+
+fn context_label(
+    name: &str,
+    extra: Option<&str>,
+    width: usize,
+    name_style: Style,
+    extra_style: Style,
+) -> Line<'static> {
+    let Some(extra) = extra.map(clean_label).filter(|extra| !extra.is_empty()) else {
+        return Line::from(Span::styled(truncate(name, width), name_style));
     };
     if width < 9 {
-        return truncate(name, width);
+        return Line::from(Span::styled(truncate(name, width), name_style));
     }
     // Keep both identifiers visible when one of them is unusually long.
     let name_width = UnicodeWidthStr::width(name).min((width - 3) / 2);
-    let branch_width = UnicodeWidthStr::width(branch.as_str()).min(width - 3 - name_width);
-    let name_width = width - 3 - branch_width;
-    format!(
-        "{} · {}",
-        truncate(name, name_width),
-        truncate(&branch, branch_width)
+    let extra_width = UnicodeWidthStr::width(extra.as_str()).min(width - 3 - name_width);
+    let name_width = width - 3 - extra_width;
+    Line::from(vec![
+        Span::styled(truncate(name, name_width), name_style),
+        Span::styled(" · ", Style::default().fg(OVERLAY0)),
+        Span::styled(truncate(&extra, extra_width), extra_style),
+    ])
+}
+
+fn project_label(name: &str, branch: Option<&str>, width: usize) -> Line<'static> {
+    context_label(
+        name,
+        branch,
+        width,
+        Style::default().fg(CYAN).add_modifier(Modifier::BOLD),
+        Style::default().fg(VIOLET),
     )
 }
 
-fn agent_label(pane: &PaneRecord, width: usize) -> String {
+fn agent_label(pane: &PaneRecord, width: usize) -> Line<'static> {
     let name = clean_label(pane.display_name());
-    match task_label(pane) {
-        Some(task) => project_label(&name, Some(&task), width),
-        None => truncate(&name, width),
-    }
+    context_label(
+        &name,
+        task_label(pane).as_deref(),
+        width,
+        Style::default().fg(ACCENT),
+        Style::default().fg(TEXT),
+    )
 }
 
 fn task_label(pane: &PaneRecord) -> Option<String> {
@@ -1660,17 +1708,18 @@ mod tests {
                 "日本語-project-with-a-long-name",
                 Some("feature/日本語-sidebar"),
                 width,
-            );
+            )
+            .to_string();
             assert!(UnicodeWidthStr::width(label.as_str()) <= width);
             if width >= 9 {
                 assert!(label.contains(" · "));
             }
         }
         assert_eq!(
-            project_label("agentmux", Some("main"), 30),
+            project_label("agentmux", Some("main"), 30).to_string(),
             "agentmux · main"
         );
-        assert_eq!(project_label("agentmux", None, 30), "agentmux");
+        assert_eq!(project_label("agentmux", None, 30).to_string(), "agentmux");
     }
 
     #[test]

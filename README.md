@@ -2,7 +2,7 @@
 
 tmux 上で動く複数の coding agent を、Herdr のサイドバーに近い操作感で一覧・監視・操作する Rust 製ツールです。tmux の session / window / pane と永続 PTY はそのまま利用します。
 
-現在は最初の usable MVP です。全 tmux session の agent、状態、場所を横断表示し、選択 pane の live preview と主要操作を提供します。UIはHerdrと同じCatppuccin Mocha基調の状態色・spinner・フラットな2段sidebarを採用しています。
+現在は最初の usable MVP です。全 tmux session の agent、状態、場所を横断表示し、選択 pane の live preview と主要操作を提供します。UIはSolarized配色の状態色・spinner・フラットな2段sidebarを採用しています。
 
 ## Implemented
 
@@ -12,7 +12,7 @@ tmux 上で動く複数の coding agent を、Herdr のサイドバーに近い�
 - agentごとのrepo名・branch・作業名の2行表示、選択中のroot/cwd/tmux位置の詳細表示
 - ANSI色・文字装飾・改行境界・cursor位置を保つvisible-screen preview
 - 通常paneのtmux履歴とACP公開ログのスクロール、履歴閲覧中の表示位置固定と末尾での自動追従復帰
-- blocked=赤、working=黄spinner、done=teal、idle=緑のHerdr式状態アイコン
+- blocked=赤、working=黄spinner、done=cyan、idle=緑のHerdr式状態アイコン
 - foreground command、TTY process、argv0、Node/Python package path、pane options による agent 識別
 - 識別済みagentの画面下端による状態推定（画面本文はagent識別に不使用）
 - `@agent_*` pane option と既存 LazyAgent integration の互換
@@ -81,7 +81,7 @@ tmuxの`source-file`は差分適用です。設定から削除した古いbindin
 
 agent-only表示はagentが0件でも通常paneへ切り替わりません。`a`で明示的にall panesへ切り替えられます。別windowへ移動した場合、agentmuxは元のwindowに残ります。
 
-agent一覧は1行目に状態アイコン・repo名・branch、2行目にagent名と取得できた作業名を表示します。作業名は有効な公開status messageを優先し、なければterminal titleを使います。汎用的な状態名やNeovimなどのeditor titleは省きます。長い名前は省略し、選択中のrepoルート・cwd・tmux位置は画面下部に表示します。
+agent一覧は1行目に状態アイコン・repo名・branch、2行目にagent名と取得できた作業名を表示し、項目間には1行の余白を設けます。Solarizedのcyanでrepo名、violetでbranch、blueでagent名を区別します。作業名は有効な公開status messageを優先し、なければterminal titleを使います。汎用的な状態名やNeovimなどのeditor titleは省きます。長い名前は省略し、選択中のrepoルート・cwd・tmux位置は画面下部の1行に並べます。収まらないパスは先頭を`…`で省略します。
 
 Git情報はpaneのcwdから読み取り専用で取得し、約5秒ごとに更新します。Git管理外や取得できない場合はディレクトリ名だけを表示します。Neovim内のACP agentでもroot/cwdはpaneの位置であり、会話固有の作業ディレクトリを保証するものではありません。
 

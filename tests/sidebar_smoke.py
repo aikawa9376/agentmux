@@ -3,6 +3,7 @@ import fcntl
 import os
 import pathlib
 import pty
+import re
 import select
 import shlex
 import struct
@@ -68,10 +69,19 @@ with tempfile.TemporaryDirectory(prefix='agentmux-sidebar-') as directory:
         rendered = screen()
         assert 'project-two · review' in rendered, rendered
         assert 'Codex · サイドバーの表示改善' in rendered, rendered
-        assert f'root  {root}' in rendered, rendered
-        assert f'cwd   {nested}' in rendered, rendered
-        assert 'tmux  fixture:0.0 · one' in rendered, rendered
+        details = next(line for line in rendered.splitlines() if 'root  ' in line)
+        assert '/project-one' in details and '/project-one/nested' in details, details
+        assert 'cwd   ' in details and 'tmux  fixture:0.0 · one' in details, details
         assert '⠋ サイドバー' not in rendered, 'title spinner was not removed'
+        rows = rendered.splitlines()
+        first_row = next(i for i, line in enumerate(rows) if 'project-one · feature/sidebar' in line)
+        second_row = next(i for i, line in enumerate(rows) if 'project-two · review' in line)
+        assert second_row - first_row == 3, 'agent entries need one blank row between their two content rows'
+        assert not rows[first_row + 2][:60].strip(), 'agent spacing row contains sidebar text'
+        colored = next(line for line in tmux('capture-pane', '-ep', '-t', ui).splitlines()
+                       if 'project-one' in line and 'feature/sidebar' in line)
+        colors = re.findall(r'\x1b\[[0-9;]*38;2;(\d+);(\d+);(\d+)[0-9;]*m', colored)
+        assert ('42', '161', '152') in colors and ('108', '113', '196') in colors, colored
         # Two different repositories in one session must retain their own branch.
         subprocess.run(['git', '-C', str(root), 'symbolic-ref', 'HEAD', 'refs/heads/renamed'], check=True)
         wait_for(lambda: 'project-one · renamed' in screen(), 'branch cache did not refresh')
@@ -82,12 +92,15 @@ with tempfile.TemporaryDirectory(prefix='agentmux-sidebar-') as directory:
                  and 'project-two · review' in screen()
                  and 'live · auto-follow' not in screen(), 'narrow layout did not render without the preview')
         tmux('set-option', '-g', 'mouse', 'on')
-        rows = screen().splitlines()
-        row = next(i for i, line in enumerate(rows) if 'project-two · review' in line)
+        row = wait_for(lambda: next((i for i, line in enumerate(screen().splitlines())
+                                    if 'project-two · review' in line), None),
+                       'second agent did not render after resizing')
         # Click the second content line of the second agent (1-based SGR coordinates).
         os.write(master, f'\x1b[<0;5;{row + 2}M\x1b[<0;5;{row + 2}m'.encode())
-        wait_for(lambda: f'root  {second_root}' in screen(), 'two-line mouse hit testing selected the wrong agent')
-        assert 'tmux  fixture:1.0 · two' in screen()
+        wait_for(lambda: 'tmux  fixture:1.0' in screen(), 'two-line mouse hit testing selected the wrong agent')
+        details = next(line for line in screen().splitlines() if 'root  ' in line)
+        assert 'cwd   ' in details and 'tmux  fixture:1.0' in details, details
+        assert '…/project-two' in details, 'narrow details should retain path basenames'
         tmux('send-keys', '-t', ui, 'q')
         wait_for(lambda: ui not in tmux('list-panes', '-a', '-F', '#{pane_id}').splitlines(), 'q did not close dashboard')
         print('Sidebar: per-pane repo/branch, task title, selected details, branch refresh, narrow layout and mouse selection passed')
