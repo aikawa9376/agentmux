@@ -2,6 +2,7 @@ use crate::{
     config::LoadedConfig,
     detect::{detect_agent_command, strip_ansi},
     model::{AgentState, PaneRecord, Snapshot},
+    project::{ProjectCache, directory_name},
     tmux::Tmux,
     watcher::{self, WatcherEvent},
 };
@@ -140,6 +141,7 @@ enum UiCommand {
 
 struct App {
     snapshot: Snapshot,
+    projects: ProjectCache,
     ui_pane_id: Option<String>,
     focus: FocusPanel,
     space_index: usize,
@@ -248,6 +250,16 @@ fn run_loop(
         if tmux.observer_socket().is_some() {
             pending_status = true;
         }
+        let mut paths = Vec::new();
+        if let Some(pane) = app.selected() {
+            paths.push(pane.cwd.clone());
+        }
+        paths.extend(
+            app.visible_pane_indices()
+                .iter()
+                .map(|index| app.snapshot.panes[*index].cwd.clone()),
+        );
+        app.projects.refresh(paths);
         terminal.draw(|frame| app.render(frame))?;
 
         if let Some(watcher) = watcher {
@@ -408,6 +420,7 @@ impl App {
             .map(|pane| pane.pane_id.clone());
         let mut app = Self {
             snapshot,
+            projects: ProjectCache::new(),
             ui_pane_id,
             focus: FocusPanel::Agents,
             space_index: 0,
@@ -939,9 +952,21 @@ impl App {
         self.animation_frame = self.animation_frame.wrapping_add(1);
         self.space_rows.clear();
         self.agent_rows.clear();
+        let details = self.selected_details();
+        let width = usize::from(frame.area().width.max(1));
+        let detail_height = details
+            .iter()
+            .map(|line| UnicodeWidthStr::width(line.as_str()).max(1).div_ceil(width))
+            .sum::<usize>()
+            .min(6)
+            .min(usize::from(frame.area().height / 3)) as u16;
         let outer = Layout::default()
             .direction(Direction::Vertical)
-            .constraints([Constraint::Min(5), Constraint::Length(2)])
+            .constraints([
+                Constraint::Min(5),
+                Constraint::Length(detail_height),
+                Constraint::Length(2),
+            ])
             .split(frame.area());
         self.preview_visible = preview_is_visible(outer[0].width, self.preview_min_width);
         self.preview_area = Rect::default();
@@ -970,7 +995,13 @@ impl App {
             .split(body);
         self.render_spaces(frame, sidebar[0]);
         self.render_agents(frame, sidebar[1]);
-        self.render_footer(frame, outer[1]);
+        frame.render_widget(
+            Paragraph::new(details.join("\n"))
+                .style(Style::default().fg(SUBTEXT0))
+                .wrap(Wrap { trim: false }),
+            outer[1],
+        );
+        self.render_footer(frame, outer[2]);
         if self.prompt.is_some() {
             self.render_prompt(frame);
         }
@@ -1052,8 +1083,20 @@ impl App {
             .map(|index| {
                 let pane = &self.snapshot.panes[*index];
                 let state = state_style(pane.state);
+                let project = self.projects.get(&pane.cwd);
+                let root = project
+                    .map(|project| project.root.as_str())
+                    .unwrap_or(&pane.cwd);
+                let name = clean_label(directory_name(root));
+                let name = if name.is_empty() {
+                    clean_label(&pane.session_name)
+                } else {
+                    name
+                };
+                let available = usize::from(area.width.saturating_sub(4));
                 let primary =
-                    truncate(&format!("{} · {}", pane.session_name, pane.window_name), 34);
+                    project_label(&name, project.and_then(|p| p.branch.as_deref()), available);
+                let secondary = agent_label(pane, available);
                 ListItem::new(vec![
                     Line::from(vec![
                         Span::raw(" "),
@@ -1068,18 +1111,8 @@ impl App {
                     ]),
                     Line::from(vec![
                         Span::raw("   "),
-                        Span::styled(pane.state.label(), state),
-                        Span::styled(" · ", Style::default().fg(OVERLAY0)),
-                        Span::styled(
-                            truncate(pane.display_name(), 24),
-                            Style::default().fg(SUBTEXT1),
-                        ),
-                        Span::styled(
-                            format!(" · {}", pane.command),
-                            Style::default().fg(SUBTEXT1),
-                        ),
+                        Span::styled(secondary, Style::default().fg(SUBTEXT1)),
                     ]),
-                    Line::default(),
                 ])
             })
             .collect();
@@ -1133,11 +1166,38 @@ impl App {
                 break;
             }
             self.agent_rows.push((
-                Rect::new(inner.x, row, inner.width, 3.min(inner.height)),
+                Rect::new(
+                    inner.x,
+                    row,
+                    inner.width,
+                    2.min(inner.y.saturating_add(inner.height).saturating_sub(row)),
+                ),
                 self.snapshot.panes[index].pane_id.clone(),
             ));
-            row = row.saturating_add(3);
+            row = row.saturating_add(2);
         }
+    }
+
+    fn selected_details(&self) -> Vec<String> {
+        let Some(pane) = self.selected() else {
+            return Vec::new();
+        };
+        let root = self
+            .projects
+            .get(&pane.cwd)
+            .map(|project| project.root.as_str())
+            .unwrap_or("—");
+        vec![
+            format!(" root  {}", clean_label(root)),
+            format!(" cwd   {}", clean_label(&pane.cwd)),
+            format!(
+                " tmux  {} · {} · {} · {}",
+                clean_label(&pane.location()),
+                clean_label(&pane.window_name),
+                pane.pane_id,
+                pane.state.label()
+            ),
+        ]
     }
 
     fn render_preview(&self, frame: &mut Frame<'_>, area: Rect) {
@@ -1446,6 +1506,119 @@ fn truncate(value: &str, width: usize) -> String {
     result
 }
 
+fn clean_label(value: &str) -> String {
+    strip_ansi(value)
+        .chars()
+        .filter(|ch| !ch.is_control() || ch.is_whitespace())
+        .map(|ch| if ch.is_whitespace() { ' ' } else { ch })
+        .collect::<String>()
+        .trim()
+        .to_owned()
+}
+
+fn project_label(name: &str, branch: Option<&str>, width: usize) -> String {
+    let Some(branch) = branch.map(clean_label).filter(|branch| !branch.is_empty()) else {
+        return truncate(name, width);
+    };
+    if width < 9 {
+        return truncate(name, width);
+    }
+    // Keep both identifiers visible when one of them is unusually long.
+    let name_width = UnicodeWidthStr::width(name).min((width - 3) / 2);
+    let branch_width = UnicodeWidthStr::width(branch.as_str()).min(width - 3 - name_width);
+    let name_width = width - 3 - branch_width;
+    format!(
+        "{} · {}",
+        truncate(name, name_width),
+        truncate(&branch, branch_width)
+    )
+}
+
+fn agent_label(pane: &PaneRecord, width: usize) -> String {
+    let name = clean_label(pane.display_name());
+    match task_label(pane) {
+        Some(task) => project_label(&name, Some(&task), width),
+        None => truncate(&name, width),
+    }
+}
+
+fn task_label(pane: &PaneRecord) -> Option<String> {
+    let reported = pane
+        .state_source
+        .starts_with("native:")
+        .then_some(pane.state_message.as_deref())
+        .flatten();
+    let command = pane.command.to_ascii_lowercase();
+    let editor = command.ends_with("vim")
+        || command.contains("nvim")
+        || matches!(command.as_str(), "vi" | "view" | "emacs" | "emacsclient");
+    let generic = [
+        "idle",
+        "working",
+        "blocked",
+        "done",
+        "unknown",
+        "ready",
+        "codex",
+        "claude",
+        "claude code",
+        "bash",
+        "zsh",
+        "fish",
+        "sh",
+        "nvim",
+        "vim",
+    ];
+    static HOSTNAME: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    let hostname = HOSTNAME.get_or_init(|| {
+        env::var("HOSTNAME")
+            .or_else(|_| env::var("HOST"))
+            .unwrap_or_else(|_| std::fs::read_to_string("/etc/hostname").unwrap_or_default())
+            .trim()
+            .to_owned()
+    });
+    // Editor titles describe buffers, not the ACP conversation they host.
+    let titles = (!editor).then_some(pane.title.as_str());
+    for value in reported.into_iter().chain(titles) {
+        let value = clean_label(value);
+        let value = value.trim_start_matches(|ch: char| {
+            matches!(
+                ch,
+                '\u{2800}'
+                    ..='\u{28ff}'
+                        | '✳'
+                        | '✻'
+                        | '✽'
+                        | '✶'
+                        | '✢'
+                        | '●'
+                        | '◉'
+                        | '✓'
+                        | '✔'
+                        | '⏺'
+                        | '⏵'
+            ) || ch.is_whitespace()
+        });
+        let duplicate = [
+            pane.display_name(),
+            pane.command.as_str(),
+            pane.cwd.as_str(),
+            directory_name(&pane.cwd),
+            hostname.as_str(),
+            hostname.split('.').next().unwrap_or_default(),
+        ]
+        .iter()
+        .any(|name| value.eq_ignore_ascii_case(name));
+        if !value.is_empty()
+            && !duplicate
+            && !generic.iter().any(|name| value.eq_ignore_ascii_case(name))
+        {
+            return Some(value.to_owned());
+        }
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1478,6 +1651,59 @@ mod tests {
     #[test]
     fn truncates_by_display_width() {
         assert_eq!(truncate("日本語abcdef", 7), "日本語…");
+    }
+
+    #[test]
+    fn context_labels_keep_branch_and_unicode_within_available_width() {
+        for width in 0..50 {
+            let label = project_label(
+                "日本語-project-with-a-long-name",
+                Some("feature/日本語-sidebar"),
+                width,
+            );
+            assert!(UnicodeWidthStr::width(label.as_str()) <= width);
+            if width >= 9 {
+                assert!(label.contains(" · "));
+            }
+        }
+        assert_eq!(
+            project_label("agentmux", Some("main"), 30),
+            "agentmux · main"
+        );
+        assert_eq!(project_label("agentmux", None, 30), "agentmux");
+    }
+
+    #[test]
+    fn task_labels_prefer_fresh_reports_and_exclude_editor_and_generic_titles() {
+        let mut pane = PaneRecord {
+            agent_kind: Some("codex".into()),
+            command: "codex".into(),
+            cwd: "/tmp/project".into(),
+            title: "⠋ サイドバーの表示改善".into(),
+            ..Default::default()
+        };
+        assert_eq!(task_label(&pane).as_deref(), Some("サイドバーの表示改善"));
+        pane.state_message = Some("認証のレビュー".into());
+        pane.state_source = "native:working".into();
+        assert_eq!(task_label(&pane).as_deref(), Some("認証のレビュー"));
+        pane.state_message = Some("working".into());
+        assert_eq!(task_label(&pane).as_deref(), Some("サイドバーの表示改善"));
+        pane.state_source = "editor:no native status".into();
+        pane.command = "nvim".into();
+        assert_eq!(task_label(&pane), None);
+        pane.command = "codex".into();
+        for title in [
+            "codex",
+            "project",
+            "/tmp/project",
+            "✓ Ready",
+            "\x1b[31mworking\x1b[0m",
+        ] {
+            pane.title = title.into();
+            assert_eq!(task_label(&pane), None, "{title}");
+        }
+        pane.title = "\x1b[31m修正\x1b[0m\nテスト\x07".into();
+        assert_eq!(task_label(&pane).as_deref(), Some("修正 テスト"));
     }
 
     #[test]

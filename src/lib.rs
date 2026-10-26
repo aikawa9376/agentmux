@@ -4,6 +4,7 @@ pub mod detect;
 pub mod model;
 pub mod observer;
 pub mod popup;
+mod project;
 pub mod remote;
 pub mod tmux;
 pub mod tui;
