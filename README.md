@@ -135,7 +135,7 @@ workingからidleになった完了を`done`として保持します。単なる
 
 既定ではbackgroundのdone/blockedをtmuxのmessageで通知し、表示中のpaneでは抑止します。Linuxのsystem通知は`notifications.system = true`で有効にできます。監視・通知設定とlocal manifest変更はobserverのstop/start、UI設定はUIの開き直しで反映します。
 
-`events`は初回snapshotに続きNDJSONのstate eventを出力します。各eventにsequenceがあり、保持上限を超えた場合は`events_lost`、observerの再起動時は`observer_restarted`となります。再開方法とIPC protocolは[設計文書](docs/design/observer-and-popup.md)を参照してください。
+`events`は初回snapshotに続きNDJSONのstate eventを出力します。各eventにsequenceがあり、保持上限を超えた場合は`events_lost`、observerの再起動時は`observer_restarted`となります。再開方法とIPC protocolはObsidianの[設計文書](obsidian://open?vault=obsidian&file=notes%2Fprojects%2Fagentmux%2Fdocs%2Fdesign%2Fobserver-and-popup)を参照してください。
 
 誤検出を調べる場合は `agentmux explain <target>` を使います。agentの識別根拠と状態判定の根拠を別々に表示します。nvimなどeditor内のintegrationは `@agent_kind` と `@agent_status` をpublishすることで検出され、通常のbuffer本文にagent名が書かれているだけでは検出されません。
 
@@ -203,13 +203,6 @@ Herdr v0.9.5を基準とする22個のagent別manifestで画面状態を判定�
 
 対象は検出・共有監視・未読完了・通知・agent操作です。Git/worktree管理と複数SSHマシン集約は対象外とし、既存のGit・SSH/tmux workflowを利用します。tmux自身が提供するPTY、session永続化、layout、copy-modeもtmuxに任せます。LAN向けのthin clientは `android/` と `web/` に実装しています。
 
-設計・調査文書:
-
-- [共有監視・送信待機・popupの設計](docs/design/observer-and-popup.md)
-- [2026-10-25 本家v0.9.5追従調査・優先順位](docs/research/herdr-v0.9.5.md)
-- [2026-09-08 本家追従・性能調査](docs/research/herdr-v0.9.0.md)
-- [Herdr 機能調査](docs/research/herdr-v0.7.3.md)
-- [機能 parity matrix](docs/parity-matrix.md)
-- [実装計画](docs/implementation-plan.md)
+設計・調査・計画はObsidianで管理しています。[資料一覧](obsidian://open?vault=obsidian&file=notes%2Fprojects%2Fagentmux%2Fdocs%2Findex)（vault内の `notes/projects/agentmux/docs/index.md`）を参照してください。
 
 ライセンスは `AGPL-3.0-or-later` です。状態判定エンジンはHerdr v0.7.3由来で、manifestの更新元・個別ライセンスを含めた固定した派生元は [NOTICE](NOTICE) に記録しています。ロゴ、音源などのブランドassetは含めていません。
